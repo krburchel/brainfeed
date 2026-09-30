@@ -1,0 +1,20 @@
+{
+  "name": "BrainFeed",
+  "short_name": "BrainFeed",
+  "description": "The private feed for your brain. Capture anything, find it again.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f6f5fb",
+  "theme_color": "#6042e8",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ],
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
+}
