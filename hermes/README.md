@@ -105,14 +105,16 @@ No delete endpoints and no way to run queries.
 - **Editing a delivered reminder:** changing its time to the future reactivates it. Editing
   only the text does not.
 
-## Procedures (run on the VPS from the verified checkout)
+## Procedures (on the VPS)
 
 ```
-bash hermes/setup.sh install                     # skill + cron script + token; prints fingerprint
-bash hermes/setup.sh activate --deliver telegram # after the fingerprint is added in Settings
-bash hermes/setup.sh status
-bash hermes/setup.sh test                        # read-only checks
-bash hermes/setup.sh uninstall [--revoke|--keep-token] [--delete-config|--keep-config]
+bash hermes/setup.sh install      # from the verified checkout: skill + cron script + token; prints fingerprint
+
+S=~/.hermes/skills/productivity/brainfeed/scripts/setup.sh   # installed copy
+bash $S activate --deliver telegram   # after the fingerprint is added in Settings
+bash $S status
+bash $S test                          # read-only checks
+bash $S uninstall [--revoke|--keep-token] [--delete-config|--keep-config]
 ```
 
 Uninstall removes the cron job, skill and cron script. With `--revoke` it also revokes the

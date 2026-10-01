@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # BrainFeed for Hermes Agent: install | activate | status | test | uninstall
 #
-# Run from a checkout of a specific, verified commit of the BrainFeed repo:
+# Run "install" from a checkout of a specific, verified commit of the repo:
 #   bash hermes/setup.sh install
+# install keeps a copy at ~/.hermes/skills/productivity/brainfeed/scripts/setup.sh,
+# which is what activate / status / test / uninstall should be run from.
 #
 # Touches only:
 #   $HERMES_HOME/skills/productivity/brainfeed/   (the skill + helper)
@@ -23,6 +25,7 @@ JOB="brainfeed-reminders"
 SCHEDULE="${BRAINFEED_SCHEDULE:-every 2m}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$SKILL_DIR/scripts/brainfeed.py"
+INSTALLED_SETUP="$SKILL_DIR/scripts/setup.sh"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -48,7 +51,8 @@ cmd_install() {
   mkdir -p "$(dirname "$SKILL_DIR")" "$HERMES_HOME/scripts"
   rm -rf "$SKILL_DIR.new"
   cp -R "$SRC/brainfeed" "$SKILL_DIR.new"
-  chmod 700 "$SKILL_DIR.new/scripts/brainfeed.py"
+  cp "$SRC/setup.sh" "$SKILL_DIR.new/scripts/setup.sh"  # so status/uninstall work after the download is deleted
+  chmod 700 "$SKILL_DIR.new/scripts/brainfeed.py" "$SKILL_DIR.new/scripts/setup.sh"
   rm -rf "$SKILL_DIR"; mv "$SKILL_DIR.new" "$SKILL_DIR"
 
   say "• Writing cron entry point $CRON_SCRIPT"
@@ -76,7 +80,7 @@ EOF
   fi
   say ""
   say "Next: Kevin adds that sha256:… fingerprint in BrainFeed → menu → Settings → Connected agents."
-  say "Then run:  bash $SRC/setup.sh activate"
+  say "Then run:  bash $INSTALLED_SETUP activate --deliver telegram"
 }
 
 cmd_activate() {
