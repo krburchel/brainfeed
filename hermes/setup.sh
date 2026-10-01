@@ -30,7 +30,14 @@ INSTALLED_SETUP="$SKILL_DIR/scripts/setup.sh"
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 helper() { BRAINFEED_CONFIG_DIR="$CFG_DIR" python3 "$HELPER" "$@"; }
-job_exists() { hermes cron list 2>/dev/null | grep -qw "$JOB"; }
+job_exists() {
+  # Capture first, then match: piping into "grep -q" lets grep exit early, hermes
+  # then dies of SIGPIPE while printing trailing warnings, and pipefail turns a
+  # real match into "not found".
+  local out
+  out="$(hermes cron list 2>/dev/null || true)"
+  grep -qw -- "$JOB" <<<"$out"
+}
 confirm() { # confirm "question" default(y|n); no terminal => safe "no"
   [[ -t 0 ]] || return 1
   local ans; read -r -p "$1 " ans || ans=""

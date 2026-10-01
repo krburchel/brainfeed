@@ -134,6 +134,15 @@ Uninstall removes the cron job, skill and cron script. With `--revoke` it also r
 token, and with `--delete-config` it removes the local token and config. It never touches notes
 or reminders. Without a terminal and without flags, it keeps the token and config.
 
+## Troubleshooting
+
+- **`hermes cron status` reports no gateway heartbeat:** cron jobs only fire inside a running
+  gateway (`hermes gateway`). If Hermes chats on Telegram but reports no heartbeat, the terminal
+  that ran `setup.sh` may be a different environment (for example a sandboxed terminal backend
+  or another `HERMES_HOME`/profile) from the gateway. Install from the gateway's environment.
+- **Is delivery running?** Kevin can check Settings → Connected agents: "last used" should
+  refresh every ~2 minutes when the job fires.
+
 ## Tests
 
 `tests/test_api.py` runs the real helper against the deployed API with two throwaway accounts.
