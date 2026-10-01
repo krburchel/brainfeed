@@ -211,6 +211,86 @@ class Reminders(unittest.TestCase):
         self.assertEqual(run("deliver").stdout, "")
 
 
+class CallRequests(unittest.TestCase):
+    """The agent path: JSON request files, never user text in a shell command."""
+
+    def write(self, name, obj, cfg=DIR_A, raw_text=None):
+        inbox = os.path.join(cfg, "inbox")
+        os.makedirs(inbox, mode=0o700, exist_ok=True)
+        path = os.path.join(inbox, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(raw_text if raw_text is not None else json.dumps(obj))
+        return path
+
+    def call(self, name, check=True):
+        p = run("call", name, check=check)
+        return p if not check else json.loads(p.stdout)
+
+    def test_hostile_text_is_stored_verbatim(self):
+        canary = os.path.join(DIR_A, "pwned")
+        body = ("line one\nBRAINFEED_EOF\ntouch " + canary + "\n$(touch " + canary + ") `touch " + canary + "`"
+                " ; touch " + canary + " && echo \"quoted\" 'single' \\ #tag")
+        path = self.write("hostile.json", {"op": "add_note", "body": body, "source": "telegram"})
+        note = self.call("hostile.json")["note"]
+        self.assertEqual(note["body"], body.strip())
+        self.assertFalse(os.path.exists(canary))
+        self.assertFalse(os.path.exists(path))  # consumed
+
+    def test_all_ops(self):
+        self.write("a.json", {"op": "add_note", "body": "call path note #callpath"})
+        nid = self.call("a.json")["note"]["id"]
+        self.write("b.json", {"op": "search_notes", "q": "#callpath"})
+        self.assertIn(nid, [n["id"] for n in self.call("b.json")["notes"]])
+        self.write("c.json", {"op": "get_note", "id": nid})
+        self.assertEqual(self.call("c.json")["note"]["id"], nid)
+        self.write("d.json", {"op": "edit_note", "id": nid, "add_tags": ["edited"], "pinned": True})
+        self.assertIn("edited", self.call("d.json")["note"]["tags"])
+        self.write("e.json", {"op": "add_reminder", "body": "call path reminder", "due_local": "2027-03-01T09:00"})
+        rid = self.call("e.json")["reminder"]["id"]
+        self.write("f.json", {"op": "list_reminders", "q": "call path"})
+        self.assertIn(rid, [r["id"] for r in self.call("f.json")["reminders"]])
+        self.write("g.json", {"op": "edit_reminder", "id": rid, "repeat": "weekly"})
+        self.assertEqual(self.call("g.json")["reminder"]["repeat"], "weekly")
+
+    def test_rejects_bad_names(self):
+        for name in ["../config.json", "a/b.json", "x.txt", "token", ".json", "a b.json", "$(id).json", "-rf.json"]:
+            p = run("call", name, check=False)
+            self.assertNotEqual(p.returncode, 0, name)
+        self.assertTrue(os.path.exists(os.path.join(DIR_A, "config.json")))
+
+    def test_rejects_links(self):
+        target = os.path.join(DIR_A, "config.json")
+        link = os.path.join(DIR_A, "inbox", "link.json")
+        os.makedirs(os.path.dirname(link), exist_ok=True)
+        os.symlink(target, link)
+        p = self.call("link.json", check=False)
+        self.assertIn("regular file", p.stderr)
+        self.assertFalse(os.path.lexists(link))      # link removed
+        self.assertTrue(os.path.exists(target))       # target untouched
+
+    def test_rejects_disallowed_ops_and_fields(self):
+        for op in ["claim", "ack", "revoke", "deliver", "token_revoke", None]:
+            self.write("op.json", {"op": op})
+            self.assertIn("Unknown op", self.call("op.json", check=False).stderr)
+        self.write("uid.json", {"op": "add_note", "body": "x", "user_id": "00000000-0000-0000-0000-000000000000"})
+        self.assertIn("400", self.call("uid.json", check=False).stderr)
+
+    def test_rejects_bad_json_and_large_files(self):
+        path = self.write("bad.json", None, raw_text="{not json")
+        self.assertIn("not valid JSON", self.call("bad.json", check=False).stderr)
+        self.assertFalse(os.path.exists(path))
+        self.write("big.json", None, raw_text='{"op":"add_note","body":"' + "x" * 70000 + '"}')
+        self.assertIn("too large", self.call("big.json", check=False).stderr)
+        self.write("arr.json", [1, 2])
+        self.assertIn("JSON object", self.call("arr.json", check=False).stderr)
+
+    def test_missing_file(self):
+        self.assertIn("No request file", self.call("nope.json", check=False).stderr)
+
+    def test_status_reports_inbox(self):
+        self.assertEqual(j("status")["inbox"], os.path.join(DIR_A, "inbox"))
+
+
 class Outage(unittest.TestCase):
     """Delivery failures are silent at first, alert once, then recover once."""
 

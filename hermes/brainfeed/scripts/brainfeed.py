@@ -2,15 +2,22 @@
 """BrainFeed helper for Hermes Agent.
 
 Talks to the BrainFeed agent API over HTTPS. Python 3.8+ standard library
-only. Reads exactly two files, both in the BrainFeed config directory
-(default ~/.config/brainfeed, override with BRAINFEED_CONFIG_DIR):
+only. Touches only the BrainFeed config directory (default ~/.config/brainfeed,
+override with BRAINFEED_CONFIG_DIR):
 
     config.json   {"base_url": "https://.../functions/v1/brainfeed-api"}
     token         64 lowercase hex chars (mode 600). Never printed.
+    state.json    reminder-delivery health (written by "deliver")
+    inbox/        request files for "call" (read once, then deleted)
 
-It also writes state.json there (reminder-delivery health only).
+Agent use: "call NAME.json". The agent writes {"op": ..., ...} to
+inbox/NAME.json with its file-writing tool, so user text never passes
+through a shell. The shell command contains only fixed, safe tokens.
 
-Commands (add --json to any of them for machine-readable output):
+    call NAME.json   ops: add_note, search_notes, get_note, edit_note,
+                     add_reminder, list_reminders, edit_reminder (see CALL_OPS)
+
+Manual commands (add --json to any of them for machine-readable output):
     status                         check connection, token and account
     add TEXT|- [--tag T]... [--source S]
     search [QUERY] [--tag T]... [--pinned] [--limit N]
@@ -37,12 +44,25 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CONFIG_DIR = os.path.expanduser(os.environ.get("BRAINFEED_CONFIG_DIR", "~/.config/brainfeed"))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
 NEXT_TOKEN_FILE = os.path.join(CONFIG_DIR, "token.next")
 STATE_FILE = os.path.join(CONFIG_DIR, "state.json")
+INBOX_DIR = os.path.join(CONFIG_DIR, "inbox")
+INBOX_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+MAX_REQUEST_BYTES = 64000
+# op -> (method, path). Only these; delivery and token operations are not callable.
+CALL_OPS = {
+    "add_note": ("POST", "/v1/notes"),
+    "search_notes": ("POST", "/v1/notes/search"),
+    "get_note": ("POST", "/v1/notes/get"),
+    "edit_note": ("POST", "/v1/notes/update"),
+    "add_reminder": ("POST", "/v1/reminders"),
+    "list_reminders": ("POST", "/v1/reminders/search"),
+    "edit_reminder": ("POST", "/v1/reminders/update"),
+}
 REPEATS = ["daily", "weekdays", "weekly", "monthly", "yearly"]
 ALERT_AFTER_FAILURES = 15  # ~30 min of failed deliveries at a 2-minute cadence
 
@@ -162,12 +182,50 @@ def emit(args, data, human):
 
 
 # --------------------------------------------------------- commands
+def read_request(name):
+    """Read and delete inbox/NAME.json. Only plain files directly in the inbox."""
+    if not (name.endswith(".json") and 6 <= len(name) <= 69 and set(name[:-5]) <= INBOX_NAME_CHARS):
+        raise HelperError("Request name must look like note-1.json (letters, digits, - and _ only).")
+    path = os.path.join(INBOX_DIR, name)
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        raise HelperError(f"No request file {path}")
+    try:
+        if not stat.S_ISREG(st.st_mode):
+            raise HelperError("Request must be a regular file (not a link or directory).")
+        if st.st_uid != os.getuid():
+            raise HelperError("Request file must be owned by the current user.")
+        if st.st_size > MAX_REQUEST_BYTES:
+            raise HelperError("Request file is too large.")
+        with open(path, encoding="utf-8") as f:
+            req = json.load(f)
+    except ValueError:
+        raise HelperError("Request file is not valid JSON.")
+    finally:
+        if os.path.islink(path) or os.path.isfile(path):
+            os.remove(path)
+    if not isinstance(req, dict):
+        raise HelperError("Request must be a JSON object.")
+    op = req.pop("op", None)
+    if op not in CALL_OPS:
+        raise HelperError(f"Unknown op {op!r}. Allowed: {', '.join(sorted(CALL_OPS))}")
+    return op, req
+
+
+def cmd_call(args):
+    op, body = read_request(args.name)
+    method, path = CALL_OPS[op]
+    print(json.dumps(api(method, path, body), indent=2, ensure_ascii=False))
+
+
 def cmd_status(args):
     data = api("GET", "/v1/status")
+    data["inbox"] = INBOX_DIR
     emit(args, data, lambda d: print(
         f"BrainFeed connected ✓\n  account: {d['account']}\n  token: {d['token']}\n"
         f"  timezone: {d['timezone']} (now {d['now_local']})\n"
-        f"  notes: {d['notes']} · open reminders: {d['open_reminders']}"))
+        f"  notes: {d['notes']} · open reminders: {d['open_reminders']}\n  inbox: {d['inbox']}"))
 
 
 def cmd_add(args):
@@ -353,6 +411,8 @@ def main(argv=None):
     sub.add_parser = lambda *a, **k: _add(*a, parents=[common], **k)
 
     sub.add_parser("status").set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("call"); s.add_argument("name"); s.set_defaults(fn=cmd_call)
 
     s = sub.add_parser("add"); s.add_argument("text"); s.add_argument("--tag", action="append")
     s.add_argument("--source", default="hermes", choices=["hermes", "telegram", "discord", "sms"]); s.set_defaults(fn=cmd_add)

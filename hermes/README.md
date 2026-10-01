@@ -17,10 +17,21 @@ Nothing listens on the VPS. All traffic is outbound HTTPS from the helper.
 | Path | Purpose |
 |---|---|
 | `brainfeed/SKILL.md` | Hermes skill: when and how to use the helper |
-| `brainfeed/scripts/brainfeed.py` | Helper CLI, Python 3.8+ stdlib only |
+| `brainfeed/scripts/brainfeed.py` | Helper CLI, Python 3.8+ stdlib only. Agent entry point: `call <file>.json` |
 | `setup.sh` | `install`, `activate`, `status`, `test`, `uninstall` |
 | `tests/test_api.py` | End-to-end tests (throwaway accounts only) |
 | `../supabase/functions/brainfeed-api/index.ts` | The API |
+
+## Shell safety
+
+Hermes never puts user text in a shell command. For every operation it writes a JSON
+request with its file-writing tool to `~/.config/brainfeed/inbox/<name>.json`
+(`<name>`: letters, digits, `-`, `_`) and runs `brainfeed.py call <name>.json`. The helper
+accepts only plain files owned by the current user, at most 64 KB, directly in the inbox (no
+links, no paths). It deletes each file after reading it, and accepts only these ops:
+`add_note`, `search_notes`, `get_note`, `edit_note`, `add_reminder`, `list_reminders`,
+`edit_reminder`. Delivery and token operations can't be called this way. The manual
+`add` / `search` / `remind` commands are for a person at a terminal.
 
 ## Credentials
 
@@ -114,6 +125,8 @@ S=~/.hermes/skills/productivity/brainfeed/scripts/setup.sh   # installed copy
 bash $S activate --deliver telegram   # after the fingerprint is added in Settings
 bash $S status
 bash $S test                          # read-only checks
+hermes cron list                      # find the brainfeed-reminders job ID, then:
+hermes cron runs <id>                 # its run history (this command takes the ID, not the name)
 bash $S uninstall [--revoke|--keep-token] [--delete-config|--keep-config]
 ```
 
@@ -127,5 +140,7 @@ or reminders. Without a terminal and without flags, it keeps the token and confi
 It covers: auth failures and refusal of the `Authorization` header; the token never appearing in
 output; cross-account isolation and `user_id` injection; note add/search/edit/tag rules; DST
 conversion; exclusive claims, lease expiry and retry, ack for one-time and repeating reminders,
-late labels, reactivation rules; outage alert-once and recover-once; refusal of http:// and loose
+late labels, reactivation rules; request files (shell metacharacters and heredoc delimiters stored
+verbatim, bad names, links, oversized and non-JSON files, disallowed ops, file deleted after use);
+outage alert-once and recover-once; refusal of http:// and loose
 token permissions; and rotation plus revocation. **Never run it against a real account.**

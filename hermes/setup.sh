@@ -9,7 +9,7 @@
 # Touches only:
 #   $HERMES_HOME/skills/productivity/brainfeed/   (the skill + helper)
 #   $HERMES_HOME/scripts/brainfeed-reminders.sh   (cron entry point)
-#   $BRAINFEED_CONFIG_DIR (default ~/.config/brainfeed): config.json, token, state.json
+#   $BRAINFEED_CONFIG_DIR (default ~/.config/brainfeed): config.json, token, state.json, inbox/
 #   one Hermes cron job named "brainfeed-reminders"
 # It never prints the token, opens no ports and changes no system settings.
 set -euo pipefail
@@ -65,7 +65,7 @@ exec python3 "$HELPER" deliver
 EOF
   chmod 700 "$CRON_SCRIPT"
 
-  mkdir -p "$CFG_DIR"; chmod 700 "$CFG_DIR"
+  mkdir -p "$CFG_DIR/inbox"; chmod 700 "$CFG_DIR" "$CFG_DIR/inbox"
   if [[ ! -f "$CFG_DIR/config.json" ]]; then
     printf '{"base_url": "%s"}\n' "$BASE_URL" > "$CFG_DIR/config.json"
   fi
@@ -115,7 +115,7 @@ cmd_test() {
   helper search --limit 1 >/dev/null && say "  search works ✓"
   say "• Reminder list:"
   helper reminders --limit 3
-  if job_exists; then say "• Cron job '$JOB' is registered ✓ (check runs with: hermes cron runs $JOB)"; else say "• Cron job '$JOB' not registered (run: setup.sh activate)"; fi
+  if job_exists; then say "• Cron job '$JOB' is registered ✓ (to see runs: find its ID with 'hermes cron list', then 'hermes cron runs <id>')"; else say "• Cron job '$JOB' not registered (run: setup.sh activate)"; fi
 }
 
 cmd_uninstall() {
