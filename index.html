@@ -243,6 +243,22 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
 .rem.overdue .rem-when .due { color: var(--danger); font-weight: 600; }
 .notice { background: var(--accent-soft); color: var(--text); border-radius: 12px; padding: 10px 14px; font-size: 13px; margin-bottom: 14px; }
 
+/* ---------- Settings ---------- */
+.modal-back { position: fixed; inset: 0; background: rgba(10, 8, 20, .45); z-index: 40; display: flex; align-items: flex-start; justify-content: center; padding: calc(env(safe-area-inset-top) + 40px) 16px 16px; overflow-y: auto; }
+.modal { width: 100%; max-width: 560px; background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow); padding: 20px; }
+.modal h2 { margin: 0 0 4px; font-size: 18px; display: flex; align-items: center; }
+.modal h2 .spacer { flex: 1; }
+.modal h3 { margin: 22px 0 6px; font-size: 14px; }
+.modal p.help { margin: 0 0 10px; color: var(--muted); font-size: 13px; }
+.modal .row { display: flex; gap: 8px; flex-wrap: wrap; }
+.modal .row .field { flex: 1; min-width: 0; }
+.agent { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; display: flex; gap: 10px; align-items: center; }
+.agent .info { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); }
+.agent .info strong { color: var(--text); font-size: 14px; }
+.agent code { font-size: 12px; overflow-wrap: anywhere; }
+.agent.revoked { opacity: .55; }
+.pill-ok { color: var(--ok); font-weight: 600; }
+
 /* ---------- Misc ---------- */
 .toast-wrap { position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 20px); transform: translateX(-50%); z-index: 50; display: grid; gap: 8px; width: min(420px, calc(100vw - 32px)); }
 .toast { background: var(--text); color: var(--bg); padding: 10px 14px; border-radius: 12px; box-shadow: var(--shadow); display: flex; align-items: center; gap: 10px; font-size: 14px; }
@@ -291,6 +307,7 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
           <div class="who" id="who"></div>
           <button data-action="theme">Theme: <span id="theme-label">Auto</span></button>
           <button data-action="notify">Enable reminder alerts</button>
+          <button data-action="settings">Settings &amp; connected agents</button>
           <button data-action="export">Export all notes (JSON)</button>
           <button data-action="signout">Sign out</button>
         </div>
@@ -375,6 +392,7 @@ const state = {
   tags: [], settings: null, reminders: [],
   files: [], remindMode: false, editing: null,
   boardNotes: {}, boardPicking: false, pickTags: [],
+  agents: [],
 };
 
 const $ = (s) => document.querySelector(s);
@@ -995,6 +1013,8 @@ $('#menu').addEventListener('click', async (e) => {
     lsSet(LS.theme, order[(order.indexOf(lsGet(LS.theme, 'auto')) + 1) % 3]); applyTheme();
   } else if (a === 'signout') {
     lsSet(LS.cache, null); await sb.auth.signOut();
+  } else if (a === 'settings') {
+    openSettings();
   } else if (a === 'export') {
     exportNotes();
   } else if (a === 'notify') {
@@ -1080,7 +1100,21 @@ $('#view-board').addEventListener('keydown', async (e) => {
 // ------------------------------------------------------------------
 // Reminders
 // ------------------------------------------------------------------
+async function loadAgents() {
+  const { data } = await sb.from('api_tokens').select('id,name,token_hash,created_at,last_used_at,revoked_at').order('created_at', { ascending: false });
+  state.agents = data || [];
+}
+
+function agoLabel(iso) {
+  const m = Math.round((Date.now() - new Date(iso)) / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  if (m < 1440) return `${Math.round(m / 60)} h ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
 async function loadReminders() {
+  loadAgents();
   const { data, error } = await sb.from('reminders').select('*').order('due_at');
   if (error) return;
   state.reminders = data;
@@ -1141,7 +1175,11 @@ function renderReminders() {
   const overdue = open.filter((r) => new Date(r.due_at) <= now);
   const upcoming = open.filter((r) => new Date(r.due_at) > now);
   const done = state.reminders.filter((r) => r.done).sort((a, b) => new Date(b.due_at) - new Date(a.due_at)).slice(0, 25);
-  let html = `<div class="notice">For now, reminders show here and as browser alerts while BrainFeed is open (menu → Enable reminder alerts). In step 2, Hermes will message you on Telegram when they're due.</div>
+  const agent = state.agents.find((t) => !t.revoked_at && t.last_used_at && Date.now() - new Date(t.last_used_at) < 15 * 60e3);
+  const notice = agent
+    ? `<span class="pill-ok">● ${esc(agent.name)} is delivering reminders</span> (last check ${esc(agoLabel(agent.last_used_at))}).`
+    : 'Reminders show here and as browser alerts while BrainFeed is open (menu → Enable reminder alerts). Connect Hermes in menu → Settings to get them on Telegram.';
+  let html = `<div class="notice">${notice}</div>
     <button class="btn small" data-rem-act="new" style="margin-bottom:6px">+ New reminder</button>`;
   if (!state.reminders.length) html += '<div class="empty"><strong>No reminders</strong>Tap the bell in the composer, or the bell on any note.</div>';
   if (overdue.length) html += `<div class="rem-section"><h3>Overdue</h3>${overdue.map(remHtml).join('')}</div>`;
@@ -1187,6 +1225,80 @@ function checkDueReminders() {
   }
   if (changed) lsSet(LS.alerted, alerted);
   loadReminders();
+}
+
+// ------------------------------------------------------------------
+// Settings: time zone + connected agents (Hermes)
+// ------------------------------------------------------------------
+async function openSettings() {
+  await loadAgents();
+  const tz = state.settings?.timezone || 'UTC';
+  let zones = [];
+  try { zones = Intl.supportedValuesOf('timeZone'); } catch {}
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML = `<div class="modal" role="dialog" aria-label="Settings">
+    <h2>Settings<span class="spacer"></span><button class="tool" data-set="close" aria-label="Close">✕</button></h2>
+    <h3>Time zone</h3>
+    <p class="help">Used for reminder times, recurring reminders and what Hermes means by "9am".</p>
+    <div class="row">
+      <input class="field" id="set-tz" list="tz-list" value="${esc(tz)}" autocomplete="off">
+      <datalist id="tz-list">${zones.map((z) => `<option value="${esc(z)}">`).join('')}</datalist>
+      <button class="btn small" data-set="tz">Save</button>
+    </div>
+    <h3>Connected agents</h3>
+    <p class="help">Paste the fingerprint Hermes gives you (it looks like <code>sha256:</code> followed by 64 characters). BrainFeed stores only the fingerprint; the real token never leaves your server.</p>
+    <div class="row">
+      <input class="field" id="agent-name" placeholder="Name" value="Hermes" style="flex:0 0 120px">
+      <input class="field" id="agent-fp" placeholder="sha256:…" autocomplete="off" spellcheck="false">
+      <button class="btn small" data-set="add">Connect</button>
+    </div>
+    <div id="agent-list" style="margin-top:12px"></div>
+  </div>`;
+  document.body.appendChild(back);
+  const render = () => {
+    back.querySelector('#agent-list').innerHTML = state.agents.length ? state.agents.map((t) => `
+      <div class="agent${t.revoked_at ? ' revoked' : ''}" data-agent="${t.id}">
+        <div class="info"><strong>${esc(t.name)}</strong> · ${t.revoked_at ? 'revoked' : t.last_used_at ? 'last used ' + esc(agoLabel(t.last_used_at)) : 'never used yet'}<br>
+          <code>${esc(t.token_hash.slice(0, 19))}…${esc(t.token_hash.slice(-6))}</code> · added ${esc(new Date(t.created_at).toLocaleDateString())}</div>
+        ${t.revoked_at ? '<button class="btn ghost small" data-set="remove">Remove</button>' : '<button class="btn ghost small" data-set="revoke" style="color:var(--danger)">Revoke</button>'}
+      </div>`).join('') : '<p class="help">No agents connected.</p>';
+  };
+  render();
+  const close = () => { back.remove(); document.removeEventListener('keydown', onKey); if (state.view === 'reminders') renderReminders(); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  back.addEventListener('click', async (e) => {
+    if (e.target === back) { close(); return; }
+    const act = e.target.closest('[data-set]')?.dataset.set; if (!act) return;
+    if (act === 'close') close();
+    else if (act === 'tz') {
+      const v = back.querySelector('#set-tz').value.trim();
+      try { new Intl.DateTimeFormat('en-US', { timeZone: v }); } catch { toast('That isn\'t a valid time zone'); return; }
+      const { data, error } = await sb.from('settings').update({ timezone: v, updated_at: new Date().toISOString() }).eq('user_id', state.user.id).select().single();
+      if (error) { toast('Couldn\'t save: ' + error.message); return; }
+      state.settings = data; toast('Time zone set to ' + v);
+    } else if (act === 'add') {
+      const fp = back.querySelector('#agent-fp').value.trim().toLowerCase();
+      const name = back.querySelector('#agent-name').value.trim() || 'Hermes';
+      if (!/^sha256:[0-9a-f]{64}$/.test(fp)) { toast('Fingerprint should be sha256: followed by 64 hex characters'); return; }
+      const { error } = await sb.from('api_tokens').insert({ name, token_hash: fp });
+      if (error) { toast(/duplicate/i.test(error.message) ? 'That fingerprint is already connected' : 'Couldn\'t connect: ' + error.message); return; }
+      back.querySelector('#agent-fp').value = '';
+      toast(name + ' connected. Tell Hermes to run its activation step.');
+      await loadAgents(); render();
+    } else if (act === 'revoke') {
+      const id = e.target.closest('[data-agent]').dataset.agent;
+      const { error } = await sb.from('api_tokens').update({ revoked_at: new Date().toISOString() }).eq('id', id);
+      if (error) { toast('Couldn\'t revoke: ' + error.message); return; }
+      toast('Revoked. That agent can no longer access BrainFeed.');
+      await loadAgents(); render();
+    } else if (act === 'remove') {
+      const id = e.target.closest('[data-agent]').dataset.agent;
+      await sb.from('api_tokens').delete().eq('id', id);
+      await loadAgents(); render();
+    }
+  });
 }
 
 // ------------------------------------------------------------------

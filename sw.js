@@ -1,6 +1,6 @@
 // Network-first service worker: always try GitHub Pages for the latest
 // version, fall back to the cached copy when offline.
-var CACHE = 'brainfeed-v1';
+var CACHE = 'brainfeed-v2';
 var ASSETS = [
   './',
   './index.html',
