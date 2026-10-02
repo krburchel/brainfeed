@@ -1,8 +1,9 @@
 // BrainFeed agent API (v1).
 //
-// A deliberately small, fixed set of operations for an agent like Hermes:
-// add / search / edit notes, add / search / edit reminders, and claim/ack
-// due reminders for delivery. No deletes, no arbitrary queries.
+// A deliberately small, fixed set of operations for an agent like Hermes
+// or an iPhone Shortcut: add / search / edit notes, attach photos, add /
+// search / edit reminders, and claim/ack due reminders for delivery.
+// No deletes, no arbitrary queries.
 //
 // Auth: "X-BrainFeed-Token: <64 hex chars>" (a bearer token in a custom
 // header: Supabase's gateway logs a prefix of any Authorization header, so
@@ -16,10 +17,12 @@ const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SE
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
-const NOTE_COLS = 'id,body,tags,source,pinned,created_at,updated_at';
+const NOTE_COLS = 'id,body,tags,source,pinned,attachments,created_at,updated_at';
 const REM_COLS = 'id,body,due_at,repeat,done,last_sent_at,source,created_at';
 const REPEATS = ['daily', 'weekdays', 'weekly', 'monthly', 'yearly'];
-const SOURCES = ['hermes', 'telegram', 'discord', 'sms'];
+const SOURCES = ['hermes', 'telegram', 'discord', 'sms', 'ios'];
+const BUCKET = 'attachments';
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
 const MAX_BODY = 20000;
 const TAG_RE = /^[a-z][\w-]{0,49}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -160,6 +163,65 @@ const withLocal = (r: Record<string, unknown>, tz: string) => ({
   ...r, due_local: fmtLocal(r.due_at as string, tz), last_sent_local: fmtLocal((r.last_sent_at as string) ?? null, tz),
 });
 
+// ------------------------------------------------------------- photos
+// The type comes from the file's leading bytes, never from its name or headers.
+function sniffImage(b: Uint8Array): { type: string; ext: string } | null {
+  const at = (i: number, str: string) => [...str].every((ch, k) => b[i + k] === ch.charCodeAt(0));
+  if (b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { type: 'image/jpeg', ext: 'jpg' };
+  if (b.length > 8 && b[0] === 0x89 && at(1, 'PNG\r\n')) return { type: 'image/png', ext: 'png' };
+  if (b.length > 6 && (at(0, 'GIF87a') || at(0, 'GIF89a'))) return { type: 'image/gif', ext: 'gif' };
+  if (b.length > 12 && at(0, 'RIFF') && at(8, 'WEBP')) return { type: 'image/webp', ext: 'webp' };
+  return null;
+}
+
+// POST /v1/photos[?note_id=UUID][&source=S][&name=N]  body: raw image bytes.
+// With note_id: attach to that note. Without: create a new "📷 Photo" note.
+// Captions are never taken from the URL (query strings end up in logs).
+async function handlePhoto(c: Caller, req: Request, url: URL) {
+  for (const k of url.searchParams.keys()) {
+    if (!['note_id', 'source', 'name'].includes(k)) throw bad(`Unknown parameter: ${k}`);
+  }
+  if (Number(req.headers.get('content-length') || 0) > MAX_PHOTO_BYTES) throw new ApiError(413, 'too_large', 'Photos must be 10 MB or smaller');
+  const bytes = new Uint8Array(await req.arrayBuffer());
+  if (!bytes.length) throw bad('Empty upload');
+  if (bytes.length > MAX_PHOTO_BYTES) throw new ApiError(413, 'too_large', 'Photos must be 10 MB or smaller');
+  const kind = sniffImage(bytes);
+  if (!kind) throw new ApiError(415, 'unsupported_media', 'Only JPEG, PNG, GIF or WebP images are accepted');
+  const src = source(url.searchParams.get('source') ?? undefined);
+
+  let noteId = url.searchParams.get('note_id');
+  let created = false;
+  if (noteId) {
+    uuid(noteId, 'note_id');
+    const { data } = await db.from('notes').select('id,attachments').eq('user_id', c.userId).eq('id', noteId).maybeSingle();
+    if (!data) throw new ApiError(404, 'not_found', 'Note not found');
+    if ((data.attachments as unknown[]).length >= 10) throw bad('A note can have at most 10 attachments');
+  } else {
+    const { data, error } = await db.from('notes').insert({ user_id: c.userId, body: '📷 Photo', source: src }).select('id').single();
+    if (error) throw new ApiError(500, 'db_error', 'Could not create note');
+    noteId = data.id as string;
+    created = true;
+  }
+
+  const base = (url.searchParams.get('name') || 'photo').replace(/\.[^.]*$/, '').replace(/[^\w-]+/g, '_').slice(0, 60) || 'photo';
+  const fileName = `${base}.${kind.ext}`;
+  const path = `${c.userId}/${noteId}/${Date.now()}-${fileName}`;
+  const up = await db.storage.from(BUCKET).upload(path, bytes, { contentType: kind.type, upsert: false });
+  if (up.error) {
+    if (created) await db.from('notes').delete().eq('user_id', c.userId).eq('id', noteId);
+    throw new ApiError(500, 'storage_error', 'Could not store photo');
+  }
+  const { data: rows, error } = await db.rpc('bf_append_attachment', {
+    p_user: c.userId, p_note: noteId, p_att: { path, name: fileName, type: kind.type, size: bytes.length },
+  });
+  if (error || !rows?.length) {
+    await db.storage.from(BUCKET).remove([path]);
+    if (created) await db.from('notes').delete().eq('user_id', c.userId).eq('id', noteId);
+    throw new ApiError(error ? 500 : 400, error ? 'db_error' : 'bad_request', error ? 'Could not attach photo' : 'A note can have at most 10 attachments');
+  }
+  return { note: rows[0], message: 'Photo saved to BrainFeed ✓' };
+}
+
 // ------------------------------------------------------------- routes
 type Handler = (c: Caller, body: Record<string, unknown>) => Promise<unknown>;
 
@@ -187,7 +249,7 @@ const routes: Record<string, Handler> = {
       .insert({ user_id: c.userId, body: text, tags: tags(b.tags, 'tags'), source: source(b.source) })
       .select(NOTE_COLS).single();
     if (error) throw new ApiError(500, 'db_error', 'Could not save note');
-    return { note: data };
+    return { note: data, message: 'Saved to BrainFeed ✓' };
   },
 
   'POST /v1/notes/search': async (c, b) => {
@@ -327,8 +389,9 @@ Deno.serve(async (req) => {
     // Path arrives as /brainfeed-api/v1/... ; strip the function name.
     const path = url.pathname.replace(/^\/(functions\/v1\/)?brainfeed-api/, '') || '/';
     const handler = routes[`${req.method} ${path}`];
-    if (!handler) throw new ApiError(404, 'not_found', `No route: ${req.method} ${path}`);
+    if (!handler && !(req.method === 'POST' && path === '/v1/photos')) throw new ApiError(404, 'not_found', `No route: ${req.method} ${path}`);
     const caller = await authenticate(req);
+    if (req.method === 'POST' && path === '/v1/photos') return json(200, await handlePhoto(caller, req, url));
     let body: Record<string, unknown> = {};
     if (req.method === 'POST') {
       const raw = await req.text();
@@ -338,7 +401,7 @@ Deno.serve(async (req) => {
         if (!body || typeof body !== 'object' || Array.isArray(body)) throw bad('Body must be a JSON object');
       }
     }
-    return json(200, await handler(caller, body));
+    return json(200, await handler!(caller, body));
   } catch (e) {
     if (e instanceof ApiError) return json(e.status, { error: e.code, message: e.message });
     // Never echo request details (headers may hold the token).

@@ -291,6 +291,118 @@ class CallRequests(unittest.TestCase):
         self.assertEqual(j("status")["inbox"], os.path.join(DIR_A, "inbox"))
 
 
+def tiny_png():
+    import struct, zlib
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    raw = b"\x00\xff\x00\x00"  # one red pixel
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def post_bytes(path, data, tok):
+    req = urllib.request.Request(BASE + path, data=data, method="POST")
+    req.add_header("X-BrainFeed-Token", tok)
+    req.add_header("Content-Type", "application/octet-stream")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        with e:
+            return e.code, json.loads(e.read() or b"{}")
+
+
+class Photos(unittest.TestCase):
+    def put(self, name, data, cfg=DIR_A):
+        inbox = os.path.join(cfg, "inbox")
+        os.makedirs(inbox, mode=0o700, exist_ok=True)
+        path = os.path.join(inbox, name)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def req(self, name, obj):
+        with open(self.put(name, b""), "w") as f:
+            json.dump(obj, f)
+
+    def call(self, name, check=True):
+        p = run("call", name, check=check)
+        return json.loads(p.stdout) if p.stdout.strip() else {}, p
+
+    def test_add_note_with_photo_and_caption(self):
+        photo = self.put("photo-1.png", tiny_png())
+        self.req("p1.json", {"op": "add_note", "body": "Shiny Ralts! #pokemon", "photos": ["photo-1.png"], "source": "telegram"})
+        out, _ = self.call("p1.json")
+        note = out["note"]
+        self.assertEqual(note["body"], "Shiny Ralts! #pokemon")
+        self.assertEqual(len(note["attachments"]), 1)
+        self.assertEqual(note["attachments"][0]["type"], "image/png")
+        self.assertTrue(note["attachments"][0]["path"].endswith("photo-1.png"))
+        self.assertIn(note["id"], note["attachments"][0]["path"])
+        self.assertFalse(os.path.exists(photo))  # copy deleted after upload
+
+    def test_photo_without_caption_and_attach_more(self):
+        self.put("a.png", tiny_png())
+        self.req("p2.json", {"op": "add_note", "photos": ["a.png"]})
+        note = self.call("p2.json")[0]["note"]
+        self.assertEqual(note["body"], "📷 Photo")
+        self.put("b.png", tiny_png()); self.put("c.png", tiny_png())
+        self.req("p3.json", {"op": "attach_photos", "id": note["id"], "photos": ["b.png", "c.png"]})
+        self.assertEqual(len(self.call("p3.json")[0]["note"]["attachments"]), 3)
+
+    def test_fake_image_rejected_before_note_is_created(self):
+        before = j("status")["notes"]
+        fake = self.put("evil.jpg", b"#!/bin/sh\necho not an image\n")
+        self.req("p4.json", {"op": "add_note", "body": "should not exist", "photos": ["evil.jpg"]})
+        _, p = self.call("p4.json", check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("not a JPEG", p.stderr)
+        self.assertEqual(j("status")["notes"], before)
+        self.assertFalse(os.path.exists(fake))
+
+    def test_bad_photo_names_links_and_size(self):
+        for bad in ["../config.json", "x.txt", "a b.png", "token"]:
+            self.req("p5.json", {"op": "add_note", "body": "x", "photos": [bad]})
+            self.assertNotEqual(self.call("p5.json", check=False)[1].returncode, 0, bad)
+        link = os.path.join(DIR_A, "inbox", "link.png")
+        os.symlink(os.path.join(DIR_A, "config.json"), link)
+        self.req("p6.json", {"op": "add_note", "body": "x", "photos": ["link.png"]})
+        self.assertIn("regular file", self.call("p6.json", check=False)[1].stderr)
+        self.assertTrue(os.path.exists(os.path.join(DIR_A, "config.json")))
+        self.put("big.jpg", b"\xff\xd8\xff" + b"0" * (10 * 1024 * 1024))
+        self.req("p7.json", {"op": "add_note", "body": "x", "photos": ["big.jpg"]})
+        self.assertIn("MB", self.call("p7.json", check=False)[1].stderr)
+
+    def test_cannot_attach_to_other_users_note(self):
+        self.put("x.png", tiny_png())
+        self.req("p8.json", {"op": "attach_photos", "id": NOTE_B, "photos": ["x.png"]})
+        out, p = self.call("p8.json", check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("404", " ".join(out.get("photo_errors", [])))
+
+    def test_shortcut_style_raw_upload_and_text(self):
+        s, d = post_bytes("/v1/photos?source=ios", tiny_png(), TOKEN_A)
+        self.assertEqual(s, 200)
+        self.assertEqual((d["note"]["body"], d["note"]["source"]), ("📷 Photo", "ios"))
+        self.assertIn("Photo saved", d["message"])
+        s, d = raw("POST", "/v1/notes", {"body": "https://www.instagram.com/p/abc123/", "source": "ios"}, {"X-BrainFeed-Token": TOKEN_A})
+        self.assertEqual((s, d["note"]["source"]), (200, "ios"))
+        self.assertIn("Saved to BrainFeed", d["message"])
+
+    def test_server_rejects_non_images_params_and_limits(self):
+        self.assertEqual(post_bytes("/v1/photos", b"<html>not an image</html>", TOKEN_A)[0], 415)
+        self.assertEqual(post_bytes("/v1/photos?caption=hi", tiny_png(), TOKEN_A)[0], 400)
+        self.assertEqual(post_bytes("/v1/photos", b"", TOKEN_A)[0], 400)
+        self.assertEqual(post_bytes("/v1/photos", tiny_png(), "ab" * 32)[0], 401)
+        s, d = post_bytes("/v1/photos", tiny_png(), TOKEN_A)
+        nid = d["note"]["id"]
+        for _ in range(9):
+            self.assertEqual(post_bytes(f"/v1/photos?note_id={nid}", tiny_png(), TOKEN_A)[0], 200)
+        s, d = post_bytes(f"/v1/photos?note_id={nid}", tiny_png(), TOKEN_A)
+        self.assertEqual(s, 400)
+        self.assertIn("at most 10", d["message"])
+
+
 class Outage(unittest.TestCase):
     """Delivery failures are silent at first, alert once, then recover once."""
 

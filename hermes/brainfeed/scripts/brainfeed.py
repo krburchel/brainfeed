@@ -15,7 +15,9 @@ inbox/NAME.json with its file-writing tool, so user text never passes
 through a shell. The shell command contains only fixed, safe tokens.
 
     call NAME.json   ops: add_note, search_notes, get_note, edit_note,
-                     add_reminder, list_reminders, edit_reminder (see CALL_OPS)
+                     attach_photos, add_reminder, list_reminders, edit_reminder
+                     add_note / attach_photos take "photos": [image files that
+                     are also in inbox/]; each is uploaded, then deleted.
 
 Manual commands (add --json to any of them for machine-readable output):
     status                         check connection, token and account
@@ -44,7 +46,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 CONFIG_DIR = os.path.expanduser(os.environ.get("BRAINFEED_CONFIG_DIR", "~/.config/brainfeed"))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
@@ -53,12 +55,16 @@ STATE_FILE = os.path.join(CONFIG_DIR, "state.json")
 INBOX_DIR = os.path.join(CONFIG_DIR, "inbox")
 INBOX_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 MAX_REQUEST_BYTES = 64000
+MAX_PHOTO_BYTES = 10 * 1024 * 1024
+MAX_PHOTOS = 10
+PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 # op -> (method, path). Only these; delivery and token operations are not callable.
 CALL_OPS = {
     "add_note": ("POST", "/v1/notes"),
     "search_notes": ("POST", "/v1/notes/search"),
     "get_note": ("POST", "/v1/notes/get"),
     "edit_note": ("POST", "/v1/notes/update"),
+    "attach_photos": None,  # handled locally: uploads inbox photos to a note
     "add_reminder": ("POST", "/v1/reminders"),
     "list_reminders": ("POST", "/v1/reminders/search"),
     "edit_reminder": ("POST", "/v1/reminders/update"),
@@ -127,16 +133,16 @@ def save_state(state):
 
 
 # ------------------------------------------------------------- http
-def api(method, path, body=None, token=None):
+def api(method, path, body=None, token=None, raw=None):
     url = load_config() + path
     tok = token or read_token()
-    data = None if body is None else json.dumps(body).encode()
+    data = raw if raw is not None else (None if body is None else json.dumps(body).encode())
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("X-BrainFeed-Token", tok)  # not Authorization: the gateway logs its prefix
-    req.add_header("Content-Type", "application/json")
+    req.add_header("Content-Type", "application/octet-stream" if raw is not None else "application/json")
     req.add_header("User-Agent", "brainfeed-hermes/" + VERSION)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with urllib.request.urlopen(req, timeout=60 if raw is not None else 20) as resp:
             return json.loads(resp.read().decode() or "{}")
     except urllib.error.HTTPError as e:
         # Report only status + the server's message; never request headers.
@@ -213,10 +219,113 @@ def read_request(name):
     return op, req
 
 
+def inbox_file(name, exts, max_bytes):
+    """Validate NAME as a plain, owned, size-capped file directly in the inbox."""
+    if not (isinstance(name, str) and name.lower().endswith(exts)):
+        raise HelperError(f"Photo names must end in {', '.join(exts)}: {name!r}")
+    stem = name.rsplit(".", 1)[0]
+    if not (1 <= len(stem) <= 64 and set(stem) <= INBOX_NAME_CHARS):
+        raise HelperError(f"Photo name must use letters, digits, - and _ only: {name!r}")
+    path = os.path.join(INBOX_DIR, name)
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        raise HelperError(f"No photo file {path}")
+    if not stat.S_ISREG(st.st_mode):
+        raise HelperError(f"{name} must be a regular file (not a link or directory).")
+    if st.st_uid != os.getuid():
+        raise HelperError(f"{name} must be owned by the current user.")
+    if st.st_size == 0 or st.st_size > max_bytes:
+        raise HelperError(f"{name} must be between 1 byte and {max_bytes // (1024 * 1024)} MB.")
+    return path
+
+
+def is_image(head):
+    return (head[:3] == b"\xff\xd8\xff" or head[:8] == b"\x89PNG\r\n\x1a\n"
+            or head[:6] in (b"GIF87a", b"GIF89a") or (head[:4] == b"RIFF" and head[8:12] == b"WEBP"))
+
+
+def take_photos(names):
+    """Validate every photo before anything is created; returns [(name, path)]."""
+    if names is None:
+        return []
+    if not isinstance(names, list) or not 1 <= len(names) <= MAX_PHOTOS:
+        raise HelperError(f"photos must be a list of 1-{MAX_PHOTOS} file names.")
+    out = []
+    for n in names:
+        path = inbox_file(n, PHOTO_EXTS, MAX_PHOTO_BYTES)
+        with open(path, "rb") as f:
+            if not is_image(f.read(12)):
+                raise HelperError(f"{n} is not a JPEG, PNG, GIF or WebP image.")
+        out.append((n, path))
+    return out
+
+
+def upload_photos(note_id, photos, source):
+    """Upload validated photos to a note; delete each file afterwards."""
+    from urllib.parse import urlencode
+    result, errors = None, []
+    for name, path in photos:
+        try:
+            with open(path, "rb") as f:
+                data = f.read(MAX_PHOTO_BYTES + 1)
+            q = urlencode({"note_id": note_id, "source": source, "name": name.rsplit(".", 1)[0]})
+            result = api("POST", "/v1/photos?" + q, raw=data)
+        except HelperError as e:
+            errors.append(f"{name}: {e}")
+        finally:
+            if os.path.islink(path) or os.path.isfile(path):
+                os.remove(path)
+    return result, errors
+
+
+def discard(names):
+    for n in names if isinstance(names, list) else []:
+        if isinstance(n, str) and set(n.replace(".", "")) <= INBOX_NAME_CHARS and "/" not in n:
+            p = os.path.join(INBOX_DIR, n)
+            if os.path.islink(p) or os.path.isfile(p):
+                os.remove(p)
+
+
 def cmd_call(args):
     op, body = read_request(args.name)
-    method, path = CALL_OPS[op]
-    print(json.dumps(api(method, path, body), indent=2, ensure_ascii=False))
+    names = body.pop("photos", None) if op in ("add_note", "attach_photos") else None
+    try:
+        if op == "attach_photos" and names is None:
+            raise HelperError("attach_photos needs a photos list.")
+        photos = take_photos(names)
+    except HelperError:
+        discard(names)
+        raise
+    if op == "attach_photos":
+        note_id = body.pop("id", None)
+        if body:
+            discard(names)
+            raise HelperError("attach_photos takes only id and photos.")
+        if not isinstance(note_id, str):
+            discard(names)
+            raise HelperError("attach_photos needs the note id.")
+        result, errors = upload_photos(note_id, photos, "hermes")
+    else:
+        if op == "add_note" and photos and not str(body.get("body", "")).strip():
+            body["body"] = "📷 Photo"
+        method, path = CALL_OPS[op]
+        try:
+            result = api(method, path, body)
+        except HelperError:
+            discard(names)
+            raise
+        errors = []
+        if photos:
+            src = body.get("source", "hermes")
+            uploaded, errors = upload_photos(result["note"]["id"], photos, src)
+            if uploaded:
+                result = uploaded
+    if errors:
+        result = dict(result or {}, photo_errors=errors)
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if errors and not (result or {}).get("note"):
+        return 1
 
 
 def cmd_status(args):
@@ -415,7 +524,7 @@ def main(argv=None):
     s = sub.add_parser("call"); s.add_argument("name"); s.set_defaults(fn=cmd_call)
 
     s = sub.add_parser("add"); s.add_argument("text"); s.add_argument("--tag", action="append")
-    s.add_argument("--source", default="hermes", choices=["hermes", "telegram", "discord", "sms"]); s.set_defaults(fn=cmd_add)
+    s.add_argument("--source", default="hermes", choices=["hermes", "telegram", "discord", "sms", "ios"]); s.set_defaults(fn=cmd_add)
 
     s = sub.add_parser("search"); s.add_argument("query", nargs="?"); s.add_argument("--tag", action="append")
     s.add_argument("--pinned", action="store_true"); s.add_argument("--limit", type=int, default=20); s.set_defaults(fn=cmd_search)

@@ -29,9 +29,30 @@ request with its file-writing tool to `~/.config/brainfeed/inbox/<name>.json`
 (`<name>`: letters, digits, `-`, `_`) and runs `brainfeed.py call <name>.json`. The helper
 accepts only plain files owned by the current user, at most 64 KB, directly in the inbox (no
 links, no paths). It deletes each file after reading it, and accepts only these ops:
-`add_note`, `search_notes`, `get_note`, `edit_note`, `add_reminder`, `list_reminders`,
-`edit_reminder`. Delivery and token operations can't be called this way. The manual
+`add_note`, `search_notes`, `get_note`, `edit_note`, `attach_photos`, `add_reminder`,
+`list_reminders`, `edit_reminder`.
+
+**Photos from Telegram:** Hermes copies the image from its own gateway cache into the inbox
+under a fixed name it chooses (`cp -- '<cache path>' inbox/photo-1.jpg`; the path must come
+from the gateway and match `^[A-Za-z0-9._/-]+$`). It then calls `add_note` with
+`"photos": ["photo-1.jpg"]`. The helper checks every photo before creating anything: plain
+file, owned, directly in the inbox, ≤10 MB, real image bytes. It uploads each photo and deletes
+the copy. If an upload fails, the note is kept and the result lists `photo_errors`. Delivery and token operations can't be called this way. The manual
 `add` / `search` / `remind` commands are for a person at a terminal.
+
+## iPhone Shortcuts
+
+`ios/build_shortcut.py` builds two Shortcuts with their **own** token, named "iPhone Shortcut"
+in Settings → Connected agents, so they can be revoked separately from Hermes:
+
+- **Save to BrainFeed:** links and text from the Share sheet (Instagram, Safari, selected
+  text) go to `/v1/notes` with source `ios`. Run it directly to type a note.
+- **Save Photo to BrainFeed:** images go to JPEG, then `/v1/photos?source=ios`, one note each.
+
+There are two shortcuts because one combined shortcut using "Get Images from Input" downloaded
+pictures from shared web pages instead of saving the link. The token is embedded in the
+shortcuts, so don't share them. Rotation: revoke "iPhone Shortcut", register a new fingerprint,
+rebuild and re-import.
 
 ## Credentials
 
@@ -89,7 +110,14 @@ are rejected. Errors come back as `{"error": code, "message": text}` with 400 / 
 | `POST /v1/reminders/ack` | `claim_id` | `acked`, updated `reminders[]` |
 | `POST /v1/token/revoke` | – | revokes the presented token |
 
+| `POST /v1/photos` | raw image bytes (≤10 MB). Query: `note_id?` (attach to that note, else a new "📷 Photo" note), `source?`, `name?`. Unknown parameters are rejected, and captions never go in the URL. | `note`, `message` |
+
 No delete endpoints and no way to run queries.
+
+**Photos:** the type comes from the file's leading bytes (JPEG, PNG, GIF, WebP only; 415 otherwise),
+never from its name or headers. Files are stored at `attachments/<user_id>/<note_id>/…` in the
+private bucket. Attachments are appended atomically by `bf_append_attachment` (service role only),
+with at most 10 per note. If storing a photo fails, a note created for it is removed again.
 
 ## Reminder behavior
 
@@ -149,7 +177,9 @@ or reminders. Without a terminal and without flags, it keeps the token and confi
 It covers: auth failures and refusal of the `Authorization` header; the token never appearing in
 output; cross-account isolation and `user_id` injection; note add/search/edit/tag rules; DST
 conversion; exclusive claims, lease expiry and retry, ack for one-time and repeating reminders,
-late labels, reactivation rules; request files (shell metacharacters and heredoc delimiters stored
+late labels, reactivation rules; photos (caption + photo, photo-only, attach more, fake
+images rejected before anything is created, bad names, links, size, other users' notes,
+Shortcut-style raw upload, non-image/unknown-parameter/10-per-note limits); request files (shell metacharacters and heredoc delimiters stored
 verbatim, bad names, links, oversized and non-JSON files, disallowed ops, file deleted after use);
 outage alert-once and recover-once; refusal of http:// and loose
 token permissions; and rotation plus revocation. **Never run it against a real account.**
