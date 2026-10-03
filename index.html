@@ -284,8 +284,16 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
       <input class="field" type="email" id="auth-email" placeholder="Email" autocomplete="email" required>
       <input class="field" type="password" id="auth-pass" placeholder="Password" autocomplete="current-password" minlength="8" required>
       <button class="btn" type="submit" id="auth-submit">Sign in</button>
+      <button class="btn ghost small" type="button" id="auth-forgot">Forgot password?</button>
       <button class="btn ghost small" type="button" id="auth-toggle">First time? Create your account</button>
       <div class="auth-msg" id="auth-msg"></div>
+    </form>
+    <form id="reset-form" class="hidden">
+      <p style="margin:0 0 4px">Choose a new password.</p>
+      <input class="field" type="password" id="reset-pass" placeholder="New password (8+ characters)" autocomplete="new-password" minlength="8" required>
+      <input class="field" type="password" id="reset-pass2" placeholder="Repeat new password" autocomplete="new-password" minlength="8" required>
+      <button class="btn" type="submit" id="reset-submit">Save new password</button>
+      <div class="auth-msg" id="reset-msg"></div>
     </form>
   </div>
 </section>
@@ -383,6 +391,9 @@ const PAGE = 50;
 const BUCKET = 'attachments';
 const LS = { queue: 'bf-queue', cache: 'bf-cache', theme: 'bf-theme', alerted: 'bf-alerted' };
 
+// A password-reset email link lands here with #...type=recovery; note it before
+// the client reads (and clears) the hash.
+let recovering = /type=recovery/.test(location.hash);
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: true, autoRefreshToken: true } });
 
 const state = {
@@ -460,8 +471,47 @@ $('#auth-form').onsubmit = async (e) => {
   } finally { $('#auth-submit').disabled = false; }
 };
 
+$('#auth-forgot').onclick = async () => {
+  const email = $('#auth-email').value.trim();
+  const msg = $('#auth-msg'); msg.className = 'auth-msg';
+  if (!email) { msg.textContent = 'Enter your email above first.'; $('#auth-email').focus(); return; }
+  $('#auth-forgot').disabled = true;
+  const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname });
+  $('#auth-forgot').disabled = false;
+  if (error) { msg.textContent = /rate/i.test(error.message) ? 'Too many emails sent. Wait a few minutes and try again.' : error.message; return; }
+  msg.className = 'auth-msg ok';
+  msg.textContent = 'If that email has an account, a reset link is on its way. Open it on this device.';
+};
+
+function showReset() {
+  $('#app').classList.add('hidden');
+  $('#auth').classList.remove('hidden');
+  $('#auth-form').classList.add('hidden');
+  $('#reset-form').classList.remove('hidden');
+  $('#reset-pass').focus();
+}
+
+$('#reset-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const a = $('#reset-pass').value, b = $('#reset-pass2').value;
+  const msg = $('#reset-msg'); msg.className = 'auth-msg';
+  if (a !== b) { msg.textContent = 'Passwords don\'t match.'; return; }
+  $('#reset-submit').disabled = true;
+  const { error } = await sb.auth.updateUser({ password: a });
+  $('#reset-submit').disabled = false;
+  if (error) { msg.textContent = error.message; return; }
+  recovering = false;
+  $('#reset-form').classList.add('hidden');
+  $('#auth-form').classList.remove('hidden');
+  toast('Password updated');
+  const { data } = await sb.auth.getSession();
+  if (data.session) { state.user = data.session.user; startApp(); }
+};
+
 sb.auth.onAuthStateChange((event, session) => {
   const u = session?.user || null;
+  if (event === 'PASSWORD_RECOVERY') recovering = true;
+  if (u && recovering) { setTimeout(showReset, 0); return; }
   if (u && (!state.user || state.user.id !== u.id)) { state.user = u; setTimeout(startApp, 0); }
   else if (!u && event === 'SIGNED_OUT') { state.user = null; showAuth(); }
   else if (!u && event === 'INITIAL_SESSION') showAuth();
