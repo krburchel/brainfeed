@@ -497,10 +497,16 @@ $('#reset-form').onsubmit = async (e) => {
   const msg = $('#reset-msg'); msg.className = 'auth-msg';
   if (a !== b) { msg.textContent = 'Passwords don\'t match.'; return; }
   $('#reset-submit').disabled = true;
+  // Clear the flag first: updateUser fires USER_UPDATED before it resolves.
+  recovering = false;
   const { error } = await sb.auth.updateUser({ password: a });
   $('#reset-submit').disabled = false;
-  if (error) { msg.textContent = error.message; return; }
-  recovering = false;
+  if (error) {
+    recovering = true;
+    msg.textContent = error.code === 'same_password'
+      ? 'That is already your password. Reload the page to continue.' : error.message;
+    return;
+  }
   $('#reset-form').classList.add('hidden');
   $('#auth-form').classList.remove('hidden');
   toast('Password updated');
@@ -511,6 +517,7 @@ $('#reset-form').onsubmit = async (e) => {
 sb.auth.onAuthStateChange((event, session) => {
   const u = session?.user || null;
   if (event === 'PASSWORD_RECOVERY') recovering = true;
+  if (event === 'USER_UPDATED') return;
   if (u && recovering) { setTimeout(showReset, 0); return; }
   if (u && (!state.user || state.user.id !== u.id)) { state.user = u; setTimeout(startApp, 0); }
   else if (!u && event === 'SIGNED_OUT') { state.user = null; showAuth(); }
