@@ -211,6 +211,18 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
 .empty strong { display: block; color: var(--text); font-size: 17px; margin-bottom: 4px; }
 .load-more { display: block; margin: 16px auto; }
 
+/* ---------- Checklists ---------- */
+.checklist { margin: 4px 0 2px; white-space: normal; }
+.check-item { display: flex; gap: 9px; align-items: flex-start; padding: 3px 0; cursor: pointer; }
+.check-item input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--accent); flex-shrink: 0; cursor: pointer; }
+.check-item span { white-space: pre-wrap; overflow-wrap: anywhere; }
+.check-item.done span { text-decoration: line-through; color: var(--muted); }
+.check-done { margin-top: 2px; }
+.check-done summary { font-size: 12px; color: var(--muted); cursor: pointer; padding: 3px 0; list-style-position: inside; }
+.add-item { width: 100%; border: 0; border-bottom: 1px dashed var(--border); background: transparent; outline: none; padding: 5px 0 4px 27px; font-size: 14px; color: var(--text); }
+.add-item:focus { border-bottom-color: var(--accent); }
+.progress { font-weight: 600; }
+
 /* ---------- Board ---------- */
 .board-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 .board-head h2 { margin: 0; font-size: 18px; }
@@ -360,6 +372,9 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
           <button class="tool" id="remind-btn" title="Make it a reminder" aria-label="Reminder">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>
           </button>
+          <button class="tool" id="list-btn" title="Add a checklist item (Enter adds the next one)" aria-label="Checklist">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>
+          </button>
           <input type="file" id="file-input" multiple class="hidden" accept="image/*,application/pdf,text/*,.doc,.docx,.xls,.xlsx,.csv,.zip">
           <span class="spacer"></span>
           <span class="hint" id="compose-hint">Enter to save · Shift+Enter for new line</span>
@@ -399,7 +414,7 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSe
 const state = {
   user: null, view: 'feed',
   notes: [], hasMore: false, loading: false,
-  tag: null, pinned: false, archived: false, archivedCount: 0, query: '',
+  tag: null, pinned: false, archived: false, todo: false, archivedCount: 0, query: '',
   tags: [], settings: null, reminders: [],
   files: [], remindMode: false, editing: null,
   boardNotes: {}, boardPicking: false, pickTags: [],
@@ -586,7 +601,10 @@ function parseQuery(q) {
   return { words, tags };
 }
 
+const OPEN_ITEM_RE = /^\s*[-*] \[ \]/m;
+
 function matchesFilter(n) {
+  if (state.todo && !OPEN_ITEM_RE.test(n.body)) return false;
   // Archived notes only show in the Archived view, or when searching.
   if (state.archived ? !n.archived_at : (n.archived_at && !state.query)) return false;
   if (state.tag && !n.tags.includes(state.tag)) return false;
@@ -605,6 +623,7 @@ async function loadNotes(reset) {
   let q = sb.from('notes').select('id,body,tags,source,pinned,attachments,archived_at,created_at,updated_at')
     .order('created_at', { ascending: false }).range(offset, offset + PAGE - 1);
   if (state.archived) q = q.not('archived_at', 'is', null);
+  if (state.todo) q = q.like('body', '%[ ]%');
   else if (!state.query) q = q.is('archived_at', null);
   if (state.tag) q = q.contains('tags', [state.tag]);
   if (state.pinned) q = q.eq('pinned', true);
@@ -619,7 +638,7 @@ async function loadNotes(reset) {
   }
   state.notes = reset ? data : state.notes.concat(data);
   state.hasMore = data.length === PAGE;
-  if (!state.tag && !state.pinned && !state.archived && !state.query) lsSet(LS.cache, { uid: state.user.id, notes: state.notes.slice(0, PAGE) });
+  if (!state.tag && !state.pinned && !state.archived && !state.todo && !state.query) lsSet(LS.cache, { uid: state.user.id, notes: state.notes.slice(0, PAGE) });
   renderFeed();
 }
 
@@ -793,6 +812,123 @@ const ICON = {
   check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
 };
 
+// ------------------------------------------------------------------
+// Checklists: lines like "- [ ] milk" / "- [x] eggs" anywhere in a note.
+// Stored as plain text, so every source (Hermes, iPhone, search) works.
+// ------------------------------------------------------------------
+const CHECK_RE = /^\s*[-*] \[([ xX])\] ?(.*)$/;
+
+function checklistItems(body) {
+  return body.split('\n').map((l, i) => { const m = l.match(CHECK_RE); return m && { i, done: m[1] !== ' ', text: m[2] }; }).filter(Boolean);
+}
+
+function progressLabel(body) {
+  const items = checklistItems(body);
+  if (!items.length) return '';
+  return `<span class="progress">${items.filter((x) => x.done).length}/${items.length} done</span>`;
+}
+
+function renderBody(body) {
+  const out = [];
+  let text = [], block = null;
+  const flushText = () => {
+    const t = text.join('\n').replace(/^\n+|\n+$/g, '');
+    if (t) out.push(`<div>${formatBody(t)}</div>`);
+    text = [];
+  };
+  const flushBlock = () => { if (block) out.push(checklistHtml(block)); block = null; };
+  body.split('\n').forEach((line, i) => {
+    const m = line.match(CHECK_RE);
+    if (m) { flushText(); (block ||= []).push({ i, done: m[1] !== ' ', text: m[2] }); }
+    else { flushBlock(); text.push(line); }
+  });
+  flushText(); flushBlock();
+  return out.join('');
+}
+
+function checklistHtml(items) {
+  const row = (x) => `<label class="check-item${x.done ? ' done' : ''}"><input type="checkbox" data-check="${x.i}"${x.done ? ' checked' : ''}><span>${formatBody(x.text) || '&nbsp;'}</span></label>`;
+  const open = items.filter((x) => !x.done), done = items.filter((x) => x.done);
+  return `<div class="checklist">${open.map(row).join('')}`
+    + (done.length ? `<details class="check-done"${open.length ? '' : ' open'}><summary>${done.length} completed</summary>${done.map(row).join('')}</details>` : '')
+    + `<input class="add-item" data-add-after="${items[items.length - 1].i}" placeholder="+ Add item" enterkeyhint="done"></div>`;
+}
+
+// Redraws replace the DOM; keep the cursor in an "+ Add item" box (and what's typed in it).
+function withAddFocus(draw) {
+  const a = document.activeElement;
+  const info = a && a.matches && a.matches('[data-add-after]') ? (() => {
+    const card = a.closest('[data-id]');
+    return { id: card?.dataset.id, view: a.closest('#view-board') ? 'board' : 'feed', idx: [...card.querySelectorAll('[data-add-after]')].indexOf(a), value: a.value };
+  })() : null;
+  draw();
+  if (!info) return;
+  const root = info.view === 'board' ? $('#view-board') : $('#feed');
+  const el = root?.querySelectorAll(`[data-id="${info.id}"] [data-add-after]`)[info.idx];
+  if (el) { el.value = info.value; el.focus(); }
+}
+
+async function setNoteBody(note, body) {
+  const old = note.body;
+  note.body = body; note.tags = localTags(body); rerender();
+  const { data, error } = await sb.from('notes').update({ body }).eq('id', note.id).select().single();
+  if (error) { note.body = old; rerender(); toast('Couldn\'t save: ' + error.message); return false; }
+  replaceNote(data); scheduleTagRefresh();
+  return true;
+}
+
+document.addEventListener('change', async (e) => {
+  const cb = e.target.closest('[data-check]');
+  if (!cb) return;
+  const note = findNote(cb.closest('[data-id]')?.dataset.id);
+  if (!note) return;
+  const lines = note.body.split('\n');
+  const i = +cb.dataset.check;
+  if (!CHECK_RE.test(lines[i] || '')) return;
+  lines[i] = lines[i].replace(/\[[ xX]\]/, cb.checked ? '[x]' : '[ ]');
+  if (!(await setNoteBody(note, lines.join('\n')))) return;
+  const items = checklistItems(note.body);
+  if (cb.checked && items.length && items.every((x) => x.done) && !note.archived_at) {
+    toast('All done ✓', 'Archive list', () => archiveNote(note, true), 6000);
+  }
+});
+
+document.addEventListener('keydown', async (e) => {
+  const input = e.target.closest?.('[data-add-after]');
+  if (!input || e.key !== 'Enter' || e.isComposing) return;
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  const id = input.closest('[data-id]').dataset.id;
+  const note = findNote(id);
+  if (!note) return;
+  const lines = note.body.split('\n');
+  lines.splice(+input.dataset.addAfter + 1, 0, '- [ ] ' + text);
+  input.value = '';
+  await setNoteBody(note, lines.join('\n'));
+});
+
+// Enter on a checklist line continues the list; Enter on an empty item ends it.
+function continueChecklist(ta, e) {
+  if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.metaKey || e.ctrlKey) return false;
+  const v = ta.value, pos = ta.selectionStart;
+  if (pos !== ta.selectionEnd) return false;
+  const start = v.lastIndexOf('\n', pos - 1) + 1;
+  const m = v.slice(start, pos).match(/^(\s*[-*] \[[ xX]\] ?)(.*)$/);
+  if (!m) return false;
+  e.preventDefault();
+  if (!m[2].trim()) {
+    ta.value = v.slice(0, start) + v.slice(pos);
+    ta.setSelectionRange(start, start);
+  } else {
+    const ins = '\n- [ ] ';
+    ta.value = v.slice(0, pos) + ins + v.slice(pos);
+    ta.setSelectionRange(pos + ins.length, pos + ins.length);
+  }
+  ta.dispatchEvent(new Event('input'));
+  return true;
+}
+
 function noteHtml(n, compact = false) {
   if (state.editing === n.id) {
     return `<div class="note edit-box" data-id="${n.id}">
@@ -806,7 +942,7 @@ function noteHtml(n, compact = false) {
     ? `<img data-path="${esc(a.path)}" alt="${esc(a.name)}" loading="lazy" data-act="zoom">`
     : `<a class="file" data-path="${esc(a.path)}" target="_blank" rel="noopener">${ICON.file}${esc(a.name)}</a>`).join('');
   return `<article class="note${n.pinned ? ' pinned' : ''}${n._queued ? ' queued' : ''}" data-id="${n.id}">
-    <div class="note-body">${highlight(formatBody(n.body))}</div>
+    <div class="note-body">${highlight(renderBody(n.body))}</div>
     ${extra.length ? `<div class="extra-tags">${extra.map((t) => `<button class="hashtag" data-tag="${esc(t)}">#${esc(t)}</button>`).join('')}</div>` : ''}
     ${att ? `<div class="attach">${att}</div>` : ''}
     <div class="note-meta">
@@ -815,6 +951,7 @@ function noteHtml(n, compact = false) {
       ${n._queued ? '<span class="src">waiting to sync</span>' : ''}
       ${n.pinned ? `<span style="color:var(--accent)">${ICON.pin}</span>` : ''}
       ${n.archived_at ? '<span class="src">archived</span>' : ''}
+      ${progressLabel(n.body)}
       <span class="spacer"></span>
       <span class="note-actions">
         <button class="tool${n.pinned ? ' pin-on' : ''}" data-act="pin" title="${n.pinned ? 'Unpin' : 'Pin'}">${ICON.pin}</button>
@@ -831,7 +968,7 @@ function noteHtml(n, compact = false) {
 function renderFeed() {
   const feed = $('#feed');
   if (!state.notes.length) {
-    const filtered = state.tag || state.pinned || state.query;
+    const filtered = state.tag || state.pinned || state.todo || state.query;
     feed.innerHTML = state.loading ? '' : state.archived && !filtered
       ? '<div class="empty"><strong>No archived notes</strong>Use the box icon on a note to archive it. It leaves your feed but stays searchable.</div>'
       : `<div class="empty"><strong>${filtered ? 'Nothing matches' : 'Your feed is empty'}</strong>${filtered ? 'Try a different search or tag.' : 'Type a thought above and hit Enter. Add #tags to file it.'}</div>`;
@@ -842,7 +979,7 @@ function renderFeed() {
       if (d !== lastDay) { html += `<div class="day">${esc(d)}</div>`; lastDay = d; }
       html += noteHtml(n);
     }
-    feed.innerHTML = html;
+    withAddFocus(() => { feed.innerHTML = html; });
     hydrateAttachments(feed);
   }
   $('#load-more').classList.toggle('hidden', !state.hasMore);
@@ -858,6 +995,7 @@ function renderStatus(loading) {
   if (q) bits.push(`${q} note${q > 1 ? 's' : ''} waiting to sync`);
   if (state.tag) bits.push(`Showing <button class="hashtag" data-tag="${esc(state.tag)}">#${esc(state.tag)}</button> <button class="btn ghost small" data-act="clear">Clear</button>`);
   else if (state.pinned) bits.push('Showing pinned notes <button class="btn ghost small" data-act="clear">Clear</button>');
+  else if (state.todo) bits.push('Showing notes with open checklist items <button class="btn ghost small" data-act="clear">Clear</button>');
   else if (state.archived) bits.push('Showing archived notes <button class="btn ghost small" data-act="clear">Clear</button>');
   if (state.query && !loading) bits.push(`${state.notes.length}${state.hasMore ? '+' : ''} result${state.notes.length === 1 ? '' : 's'}`);
   el.innerHTML = bits.join(' ');
@@ -866,8 +1004,9 @@ function renderStatus(loading) {
 
 function renderTags() {
   const total = state.tags.reduce((a, t) => a + Number(t.count), 0);
-  let html = `<button class="tag-item${!state.tag && !state.pinned && !state.archived ? ' active' : ''}" data-filter="all"><span>All notes</span></button>`;
+  let html = `<button class="tag-item${!state.tag && !state.pinned && !state.archived && !state.todo ? ' active' : ''}" data-filter="all"><span>All notes</span></button>`;
   html += `<button class="tag-item${state.pinned ? ' active' : ''}" data-filter="pinned"><span>Pinned</span></button>`;
+  html += `<button class="tag-item${state.todo ? ' active' : ''}" data-filter="todo"><span>To-do</span></button>`;
   html += `<button class="tag-item${state.archived ? ' active' : ''}" data-filter="archived"><span>Archived</span>${state.archivedCount ? `<span class="n">${state.archivedCount}</span>` : ''}</button>`;
   for (const t of state.tags) {
     html += `<button class="tag-item${state.tag === t.tag ? ' active' : ''}" data-tag="${esc(t.tag)}"><span>#${esc(t.tag)}</span><span class="n">${t.count}</span></button>`;
@@ -883,8 +1022,18 @@ const compose = $('#compose');
 function autosize() { compose.style.height = 'auto'; compose.style.height = Math.min(compose.scrollHeight, 320) + 'px'; }
 compose.addEventListener('input', autosize);
 compose.addEventListener('keydown', (e) => {
+  if (continueChecklist(compose, e)) return;
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitCompose(); return; }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !matchMedia('(hover: none)').matches) { e.preventDefault(); submitCompose(); }
 });
+$('#list-btn').onclick = () => {
+  const v = compose.value;
+  const prefix = !v ? '- [ ] ' : (v.endsWith('\n') ? '' : '\n') + '- [ ] ';
+  compose.value = v + prefix;
+  compose.focus();
+  compose.setSelectionRange(compose.value.length, compose.value.length);
+  autosize();
+};
 if (matchMedia('(hover: none)').matches) $('#compose-hint').classList.add('hidden');
 $('#send-btn').onclick = submitCompose;
 $('#attach-btn').onclick = () => $('#file-input').click();
@@ -954,7 +1103,7 @@ document.addEventListener('click', async (e) => {
   const tagBtn = e.target.closest('[data-tag]');
   if (tagBtn && !e.target.closest('.board-picker')) { setFilter({ tag: tagBtn.dataset.tag }); return; }
   const f = e.target.closest('[data-filter]');
-  if (f) { setFilter(f.dataset.filter === 'pinned' ? { pinned: true } : f.dataset.filter === 'archived' ? { archived: true } : {}); return; }
+  if (f) { setFilter(f.dataset.filter === 'pinned' ? { pinned: true } : f.dataset.filter === 'archived' ? { archived: true } : f.dataset.filter === 'todo' ? { todo: true } : {}); return; }
   const actEl = e.target.closest('[data-act]');
   if (!actEl) return;
   const act = actEl.dataset.act;
@@ -1012,6 +1161,7 @@ async function archiveNote(note, archive, quiet = false) {
 
 document.addEventListener('keydown', (e) => {
   if (e.target.id === 'edit-text') {
+    if (continueChecklist(e.target, e)) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); const n = findNote(state.editing); if (n) saveEdit(n); }
     if (e.key === 'Escape') { state.editing = null; rerender(); }
   }
@@ -1063,8 +1213,8 @@ function openLightbox(src) {
 // ------------------------------------------------------------------
 // Filters, search, views
 // ------------------------------------------------------------------
-function setFilter({ tag = null, pinned = false, archived = false }) {
-  state.tag = tag; state.pinned = pinned; state.archived = archived;
+function setFilter({ tag = null, pinned = false, archived = false, todo = false }) {
+  state.tag = tag; state.pinned = pinned; state.archived = archived; state.todo = todo;
   if (state.view !== 'feed') switchView('feed');
   renderTags(); loadNotes(true);
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1160,7 +1310,7 @@ function renderBoard() {
         <div class="column-list">${notes.map((n) => noteHtml(n, true)).join('') || '<div class="empty" style="padding:24px 8px">Empty</div>'}</div></div>`;
     }).join('') + '</div>';
   }
-  el.innerHTML = html;
+  withAddFocus(() => { el.innerHTML = html; });
   hydrateAttachments(el);
 }
 
