@@ -29,8 +29,8 @@ request with its file-writing tool to `~/.config/brainfeed/inbox/<name>.json`
 (`<name>`: letters, digits, `-`, `_`) and runs `brainfeed.py call <name>.json`. The helper
 accepts only plain files owned by the current user, at most 64 KB, directly in the inbox (no
 links, no paths). It deletes each file after reading it, and accepts only these ops:
-`add_note`, `search_notes`, `get_note`, `edit_note`, `attach_photos`, `add_reminder`,
-`list_reminders`, `edit_reminder`.
+`add_note`, `search_notes`, `get_note`, `edit_note`, `append_note`, `attach_photos`,
+`add_reminder`, `list_reminders`, `edit_reminder`, `calendar`.
 
 **Photos from Telegram:** Hermes copies the image from its own gateway cache into the inbox
 under a fixed name it chooses (`cp -- '<cache path>' inbox/photo-1.jpg`; the path must come
@@ -102,8 +102,10 @@ are rejected. Errors come back as `{"error": code, "message": text}` with 400 / 
 | `POST /v1/notes` | `body` (≤20k), `tags?[]`, `source?` (hermes / telegram / discord / sms) | `note` |
 | `POST /v1/notes/search` | `q?` (words AND-ed, `#tag` filters), `tags?[]`, `pinned?`, `limit?` ≤50, `before?` ISO | `notes[]` newest first |
 | `POST /v1/notes/get` | `id` | `note` |
-| `POST /v1/notes/update` | `id`, `body?`, `add_tags?[]`, `remove_tags?[]`, `pinned?` | `note` (hashtags re-derived from a new body; manual tags kept) |
-| `POST /v1/reminders` | `body` (≤2k), `due_at` (ISO **with** offset) **or** `due_local` (`YYYY-MM-DDTHH:MM` in the user's zone), `repeat?`, `source?` | `reminder` with `due_local` |
+| `POST /v1/notes/update` | `id`, `body?`, `add_tags?[]`, `remove_tags?[]`, `pinned?`, `archived?` (true hides from the feed, false restores) | `note` (hashtags re-derived from a new body; manual tags kept) |
+| `POST /v1/notes/append` | `id`, `body` | `note` with `\n\n— Oct 4, 8:30 PM\n<body>` added (stamp in the user's zone, built server-side) |
+| `POST /v1/calendar` | `from_local?` (`YYYY-MM-DD`, default today), `days?` 1–31 (default 7) | `days[]`: `date`, `weekday`, `reminders[]` (`time_local`, `repeat`, `status`: scheduled / overdue / repeat / done) and `notes[]` (`first_line`). Repeats expanded with the same wall-clock, anchored, month-end-clamped rules as delivery |
+| `POST /v1/reminders` | `body` (≤2k), `due_at` (ISO **with** offset) **or** `due_local` (`YYYY-MM-DDTHH:MM` in the user's zone) **or** `dates_local` (list of 1–100 local times, at least one in the future; stored as repeat `dates`), `repeat?`, `source?` | `reminder` with `due_local` |
 | `POST /v1/reminders/search` | `q?`, `include_done?`, `limit?` ≤100 | `reminders[]` soonest first |
 | `POST /v1/reminders/update` | `id`, `body?`, `due_at?`/`due_local?`, `repeat?` (`none` clears), `done?` | `reminder` |
 | `POST /v1/reminders/claim` | `limit?` ≤50, `lease_seconds?` 30–3600 | `claim_id`, `reminders[]` with `late_minutes` |
@@ -140,7 +142,8 @@ with at most 10 per note. If storing a photo fails, a note created for it is rem
 - **API offline:** `deliver` stays silent. After about 30 min of consecutive failures it posts
   one warning, and one "working again" message when it recovers. A revoked token triggers one
   warning immediately.
-- **Recurring:** `daily`, `weekdays` (Mon–Fri), `weekly`, `monthly`, `yearly`.
+- **Recurring:** `daily`, `weekdays` (Mon–Fri), `weekly`, `monthly`, `yearly`, or `dates`
+  (a list of specific dates: delivery steps to the next listed date and finishes after the last).
 - **Editing a delivered reminder:** changing its time to the future reactivates it. Editing
   only the text does not.
 

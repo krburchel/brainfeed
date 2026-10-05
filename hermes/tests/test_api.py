@@ -403,6 +403,84 @@ class Photos(unittest.TestCase):
         self.assertIn("at most 10", d["message"])
 
 
+class CalendarAndNotes13(unittest.TestCase):
+    """Skill 1.3: calendar, append_note, archive via edit_note, specific dates."""
+
+    def call(self, obj, name="c13.json", check=True):
+        inbox = os.path.join(DIR_A, "inbox")
+        os.makedirs(inbox, mode=0o700, exist_ok=True)
+        with open(os.path.join(inbox, name), "w") as f:
+            json.dump(obj, f)
+        p = run("call", name, check=check)
+        return json.loads(p.stdout) if p.returncode == 0 else p
+
+    def local_day(self, offset_days=0):
+        # Today's date in BrainFeed's time zone, from the API itself
+        cal = self.call({"op": "calendar", "days": 1})
+        today = datetime.strptime(cal["from_local"], "%Y-%m-%d")
+        return (today + timedelta(days=offset_days)).strftime("%Y-%m-%d")
+
+    def test_append_note(self):
+        n = j("add", "Shiny hunt log #pokemon")["note"]
+        out = self.call({"op": "append_note", "id": n["id"], "body": "1,377 eggs, SHINY"})
+        body = out["note"]["body"]
+        self.assertRegex(body, r"^Shiny hunt log #pokemon\n\n— [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} [AP]M\n1,377 eggs, SHINY$")
+        self.assertIn("Added", out["message"])
+        self.assertIn("404", self.call({"op": "append_note", "id": NOTE_B, "body": "x"}, check=False).stderr)
+
+    def test_archive_via_edit(self):
+        n = j("add", "archive me")["note"]
+        a = self.call({"op": "edit_note", "id": n["id"], "archived": True})["note"]
+        self.assertIsNotNone(a["archived_at"])
+        b = self.call({"op": "edit_note", "id": n["id"], "archived": False})["note"]
+        self.assertIsNone(b["archived_at"])
+
+    def test_specific_dates_reminder(self):
+        d1, d2, d3 = self.local_day(3), self.local_day(10), self.local_day(20)
+        name = "recycling " + os.urandom(4).hex()
+        r = self.call({"op": "add_reminder", "body": name, "dates_local": [f"{d2}T18:30", f"{d1}T18:30", f"{d3}T18:30"]})["reminder"]
+        self.assertEqual(r["repeat"], "dates")
+        self.assertEqual(len(r["dates"]), 3)
+        self.assertRegex(r["due_local"], r"6:30\sPM$")
+        cal = self.call({"op": "calendar", "from_local": self.local_day(0), "days": 21})
+        hits = [d["date"] for d in cal["days"] for x in d["reminders"] if x["body"] == name]
+        self.assertEqual(hits, [d1, d2, d3])
+
+    def test_specific_dates_validation(self):
+        past = self.local_day(-3)
+        for bad in ({"dates_local": [f"{past}T09:00"]},
+                    {"dates_local": [f"{self.local_day(2)}T09:00"], "due_local": f"{self.local_day(2)}T09:00"},
+                    {"repeat": "dates", "due_local": f"{self.local_day(2)}T09:00"},
+                    {"dates_local": []}):
+            p = self.call({"op": "add_reminder", "body": "x", **bad}, check=False)
+            self.assertIn("400", p.stderr, bad)
+
+    def test_calendar_projects_repeats_and_notes(self):
+        tomorrow = self.local_day(1)
+        ws = "weekly sync " + os.urandom(4).hex()
+        self.call({"op": "add_reminder", "body": ws, "due_local": f"{tomorrow}T09:00", "repeat": "weekly"})
+        j("add", "calendar note today")
+        cal = self.call({"op": "calendar", "days": 15})
+        self.assertEqual(len(cal["days"]), 15)
+        by = {d["date"]: d for d in cal["days"]}
+        self.assertEqual([x["status"] for x in by[tomorrow]["reminders"] if x["body"] == ws], ["scheduled"])
+        self.assertEqual([x["status"] for x in by[self.local_day(8)]["reminders"] if x["body"] == ws], ["repeat"])
+        self.assertEqual([x["time_local"] for x in by[self.local_day(8)]["reminders"] if x["body"] == ws], ["9:00 AM"])
+        self.assertIn("calendar note today", [n["first_line"] for n in by[cal["from_local"]]["notes"]])
+
+    def test_calendar_dst(self):
+        # 9:00 AM weekly from Oct 30 2026 (PDT) stays 9:00 AM on Nov 6 (PST).
+        dw = "dst weekly " + os.urandom(4).hex()
+        self.call({"op": "add_reminder", "body": dw, "due_local": "2026-10-30T09:00", "repeat": "weekly"})
+        cal = self.call({"op": "calendar", "from_local": "2026-11-01", "days": 14})
+        times = {d["date"]: x["time_local"] for d in cal["days"] for x in d["reminders"] if x["body"] == dw}
+        self.assertEqual(times, {"2026-11-06": "9:00 AM", "2026-11-13": "9:00 AM"})
+
+    def test_calendar_validation(self):
+        self.assertIn("400", self.call({"op": "calendar", "days": 40}, check=False).stderr)
+        self.assertIn("400", self.call({"op": "calendar", "from_local": "next week"}, check=False).stderr)
+
+
 class Outage(unittest.TestCase):
     """Delivery failures are silent at first, alert once, then recover once."""
 

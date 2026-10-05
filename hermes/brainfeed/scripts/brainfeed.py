@@ -14,8 +14,9 @@ Agent use: "call NAME.json". The agent writes {"op": ..., ...} to
 inbox/NAME.json with its file-writing tool, so user text never passes
 through a shell. The shell command contains only fixed, safe tokens.
 
-    call NAME.json   ops: add_note, search_notes, get_note, edit_note,
-                     attach_photos, add_reminder, list_reminders, edit_reminder
+    call NAME.json   ops: add_note, search_notes, get_note, edit_note, append_note,
+                     attach_photos, add_reminder, list_reminders, edit_reminder,
+                     calendar
                      add_note / attach_photos take "photos": [image files that
                      are also in inbox/]; each is uploaded, then deleted.
 
@@ -46,7 +47,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 CONFIG_DIR = os.path.expanduser(os.environ.get("BRAINFEED_CONFIG_DIR", "~/.config/brainfeed"))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
@@ -64,6 +65,8 @@ CALL_OPS = {
     "search_notes": ("POST", "/v1/notes/search"),
     "get_note": ("POST", "/v1/notes/get"),
     "edit_note": ("POST", "/v1/notes/update"),
+    "append_note": ("POST", "/v1/notes/append"),
+    "calendar": ("POST", "/v1/calendar"),
     "attach_photos": None,  # handled locally: uploads inbox photos to a note
     "add_reminder": ("POST", "/v1/reminders"),
     "list_reminders": ("POST", "/v1/reminders/search"),
@@ -463,7 +466,8 @@ def cmd_deliver(args):
     for r in items:
         late = r.get("late_minutes", 0)
         note = f" (was due {r['due_local']})" if late >= 10 else ""
-        rep = f" · repeats {r['repeat']}" if r.get("repeat") else ""
+        rep = (" · more dates scheduled" if r.get("repeat") == "dates"
+               else f" · repeats {r['repeat']}" if r.get("repeat") else "")
         lines.append(f"⏰ {r['body']}{note}{rep}")
 
     if items:

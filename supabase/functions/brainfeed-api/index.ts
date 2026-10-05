@@ -17,8 +17,8 @@ const db = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SE
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
-const NOTE_COLS = 'id,body,tags,source,pinned,attachments,created_at,updated_at';
-const REM_COLS = 'id,body,due_at,repeat,done,last_sent_at,source,created_at';
+const NOTE_COLS = 'id,body,tags,source,pinned,attachments,archived_at,parent_id,created_at,updated_at';
+const REM_COLS = 'id,body,due_at,repeat,dates,done,last_sent_at,source,created_at';
 const REPEATS = ['daily', 'weekdays', 'weekly', 'monthly', 'yearly'];
 const SOURCES = ['hermes', 'telegram', 'discord', 'sms', 'ios'];
 const BUCKET = 'attachments';
@@ -108,7 +108,8 @@ function bool(v: unknown, field: string) {
 function repeat(v: unknown) {
   if (v === undefined) return undefined;
   if (v === null || v === 'none') return null;
-  if (typeof v !== 'string' || !REPEATS.includes(v)) throw bad(`repeat must be one of: none, ${REPEATS.join(', ')}`);
+  if (v === 'dates') return 'dates';
+  if (typeof v !== 'string' || !REPEATS.includes(v)) throw bad(`repeat must be one of: none, ${REPEATS.join(', ')}, dates`);
   return v;
 }
 function source(v: unknown) {
@@ -159,6 +160,63 @@ function fmtLocal(iso: string | null, tz: string) {
   if (!iso) return null;
   return new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(iso));
 }
+// Local calendar parts of an instant in tz.
+function localParts(at: Date, tz: string) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  }).formatToParts(at).map((x) => [x.type, x.value]));
+  return { y: +p.year, m: +p.month, d: +p.day, h: +p.hour, mi: +p.minute };
+}
+const pad = (n: number) => String(n).padStart(2, '0');
+const dateKey = (y: number, m: number, d: number) => `${y}-${pad(m)}-${pad(d)}`;
+const localKey = (at: Date, tz: string) => { const p = localParts(at, tz); return dateKey(p.y, p.m, p.d); };
+function shortTime(at: Date, tz: string) {
+  return new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(at).replace(/\s/g, ' ');
+}
+
+// Occurrences of a reminder in [from, to), using the same rules as the
+// database's next_occurrence: wall-clock time in tz, anchored to the
+// original date, month-end days clamped.
+function occurrences(r: Record<string, unknown>, from: Date, to: Date, tz: string): Date[] {
+  const due = new Date(r.due_at as string);
+  if (r.repeat === 'dates') return ((r.dates as string[]) || []).map((x) => new Date(x)).filter((x) => x >= from && x < to);
+  if (!r.repeat || r.done) return due >= from && due < to ? [due] : [];
+  const a = localParts(due, tz);
+  const at = (k: number): Date | null => {
+    let y = a.y, m = a.m, d = a.d;
+    if (r.repeat === 'daily' || r.repeat === 'weekdays' || r.repeat === 'weekly') {
+      const t = new Date(Date.UTC(a.y, a.m - 1, a.d + (r.repeat === 'weekly' ? 7 * k : k)));
+      if (r.repeat === 'weekdays' && (t.getUTCDay() === 0 || t.getUTCDay() === 6)) return null;
+      y = t.getUTCFullYear(); m = t.getUTCMonth() + 1; d = t.getUTCDate();
+    } else {
+      const months = (a.m - 1) + (r.repeat === 'monthly' ? k : 12 * k);
+      y = a.y + Math.floor(months / 12); m = (months % 12) + 1;
+      d = Math.min(a.d, new Date(Date.UTC(y, m, 0)).getUTCDate());
+    }
+    return localToUtc(`${dateKey(y, m, d)}T${pad(a.h)}:${pad(a.mi)}`, tz);
+  };
+  const days = Math.floor((from.getTime() - due.getTime()) / 864e5);
+  let k = Math.max(0, r.repeat === 'weekly' ? Math.floor(days / 7) - 1 : r.repeat === 'monthly' ? Math.floor(days / 31) - 1
+    : r.repeat === 'yearly' ? Math.floor(days / 366) - 1 : days - 1);
+  const out: Date[] = [];
+  for (let n = 0; n < 400; n++, k++) {
+    const x = at(k);
+    if (!x) continue;
+    if (x >= to) break;
+    if (x >= from && x >= due) out.push(x);
+  }
+  return out;
+}
+
+function parseDatesLocal(v: unknown, tz: string) {
+  if (!Array.isArray(v) || v.length < 1 || v.length > 100) throw bad('dates_local must be a list of 1-100 local times like 2026-10-09T18:30');
+  const ds = v.map((x) => { if (typeof x !== 'string') throw bad('dates_local entries must be strings'); return localToUtc(x, tz); })
+    .sort((p, q) => p.getTime() - q.getTime());
+  const next = ds.find((d) => d.getTime() > Date.now());
+  if (!next) throw bad('dates_local needs at least one future date');
+  return { dates: ds, next };
+}
+
 const withLocal = (r: Record<string, unknown>, tz: string) => ({
   ...r, due_local: fmtLocal(r.due_at as string, tz), last_sent_local: fmtLocal((r.last_sent_at as string) ?? null, tz),
 });
@@ -282,7 +340,7 @@ const routes: Record<string, Handler> = {
   },
 
   'POST /v1/notes/update': async (c, b) => {
-    only(b, ['id', 'body', 'add_tags', 'remove_tags', 'pinned']);
+    only(b, ['id', 'body', 'add_tags', 'remove_tags', 'pinned', 'archived']);
     const id = uuid(b.id);
     const { data: cur } = await db.from('notes').select('id,tags').eq('user_id', c.userId).eq('id', id).maybeSingle();
     if (!cur) throw new ApiError(404, 'not_found', 'Note not found');
@@ -290,12 +348,14 @@ const routes: Record<string, Handler> = {
     if (b.body !== undefined && !text) throw bad('body must not be empty');
     const add = tags(b.add_tags, 'add_tags'), remove = tags(b.remove_tags, 'remove_tags');
     const pinned = bool(b.pinned, 'pinned');
-    if (text === undefined && !add.length && !remove.length && pinned === undefined) throw bad('Nothing to update');
+    const archived = bool(b.archived, 'archived');
+    if (text === undefined && !add.length && !remove.length && pinned === undefined && archived === undefined) throw bad('Nothing to update');
     // Body first: the database re-derives #hashtags from the new text.
-    if (text !== undefined || pinned !== undefined) {
+    if (text !== undefined || pinned !== undefined || archived !== undefined) {
       const patch: Record<string, unknown> = {};
       if (text !== undefined) patch.body = text;
       if (pinned !== undefined) patch.pinned = pinned;
+      if (archived !== undefined) patch.archived_at = archived ? new Date().toISOString() : null;
       const { error } = await db.from('notes').update(patch).eq('user_id', c.userId).eq('id', id);
       if (error) throw new ApiError(500, 'db_error', 'Could not update note');
     }
@@ -309,13 +369,86 @@ const routes: Record<string, Handler> = {
     return { note: data };
   },
 
-  'POST /v1/reminders': async (c, b) => {
-    only(b, ['body', 'due_at', 'due_local', 'repeat', 'source']);
+  'POST /v1/notes/append': async (c, b) => {
+    only(b, ['id', 'body']);
+    const id = uuid(b.id);
+    const text = str(b.body, 'body', { required: true })!;
+    const { data: cur } = await db.from('notes').select('body').eq('user_id', c.userId).eq('id', id).maybeSingle();
+    if (!cur) throw new ApiError(404, 'not_found', 'Note not found');
     const tz = await userTz(c.userId);
-    const due = parseDue(b, tz, true)!;
+    const stamp = '— ' + new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+      .format(new Date()).replace(/\s/g, ' ');
+    const body = `${(cur.body as string).replace(/\s+$/, '')}\n\n${stamp}\n${text}`;
+    if (body.length > MAX_BODY) throw bad('Note would be too long');
+    const { data, error } = await db.from('notes').update({ body }).eq('user_id', c.userId).eq('id', id).select(NOTE_COLS).single();
+    if (error) throw new ApiError(500, 'db_error', 'Could not update note');
+    return { note: data, message: 'Added to the note ✓' };
+  },
+
+  'POST /v1/calendar': async (c, b) => {
+    only(b, ['from_local', 'days']);
+    const tz = await userTz(c.userId);
+    const days = int(b.days, 'days', 7, 1, 31);
+    let start: string;
+    if (b.from_local === undefined) { const p = localParts(new Date(), tz); start = dateKey(p.y, p.m, p.d); }
+    else if (typeof b.from_local === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(b.from_local)) start = b.from_local;
+    else throw bad('from_local must look like 2026-10-05');
+    const from = localToUtc(`${start}T00:00`, tz);
+    const [y, m, d] = start.split('-').map(Number);
+    const endDay = new Date(Date.UTC(y, m - 1, d + days));
+    const to = localToUtc(`${dateKey(endDay.getUTCFullYear(), endDay.getUTCMonth() + 1, endDay.getUTCDate())}T00:00`, tz);
+    const [{ data: rems, error: e1 }, { data: notes, error: e2 }] = await Promise.all([
+      db.from('reminders').select(REM_COLS).eq('user_id', c.userId),
+      db.from('notes').select('id,body,created_at').eq('user_id', c.userId).is('archived_at', null)
+        .gte('created_at', from.toISOString()).lt('created_at', to.toISOString()).order('created_at').limit(500),
+    ]);
+    if (e1 || e2) throw new ApiError(500, 'db_error', 'Calendar lookup failed');
+    const out: Record<string, { date: string; weekday: string; reminders: unknown[]; notes: unknown[] }> = {};
+    for (let i = 0; i < days; i++) {
+      const t = new Date(Date.UTC(y, m - 1, d + i));
+      const key = dateKey(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());
+      out[key] = { date: key, weekday: new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: 'UTC' }).format(t), reminders: [], notes: [] };
+    }
+    const now = Date.now();
+    for (const r of rems || []) {
+      for (const at of occurrences(r, from, to, tz)) {
+        const day = out[localKey(at, tz)];
+        if (!day) continue;
+        const real = at.getTime() === new Date(r.due_at as string).getTime();
+        day.reminders.push({
+          id: r.id, body: r.body, time_local: shortTime(at, tz), repeat: r.repeat,
+          status: r.done || (r.repeat === 'dates' && !real && at < new Date(r.due_at as string)) ? 'done'
+            : real && at.getTime() <= now ? 'overdue' : real ? 'scheduled' : 'repeat',
+          _t: at.getTime(),
+        });
+      }
+    }
+    for (const n of notes || []) {
+      const day = out[localKey(new Date(n.created_at as string), tz)];
+      if (day) day.notes.push({ id: n.id, first_line: ((n.body as string).split('\n').find((l) => l.trim()) || '').slice(0, 80) });
+    }
+    for (const day of Object.values(out)) {
+      (day.reminders as { _t: number }[]).sort((p, q) => p._t - q._t).forEach((x) => delete (x as Record<string, unknown>)._t);
+    }
+    return { timezone: tz, from_local: start, days: Object.values(out) };
+  },
+
+  'POST /v1/reminders': async (c, b) => {
+    only(b, ['body', 'due_at', 'due_local', 'dates_local', 'repeat', 'source']);
+    const tz = await userTz(c.userId);
+    let due: Date, rep = repeat(b.repeat) ?? null, dates: string[] | null = null;
+    if (b.dates_local !== undefined) {
+      if (b.due_at !== undefined || b.due_local !== undefined) throw bad('Send dates_local or a single due time, not both');
+      if (rep !== null && rep !== undefined && b.repeat !== 'dates') throw bad('dates_local cannot be combined with another repeat');
+      const p = parseDatesLocal(b.dates_local, tz);
+      due = p.next; rep = 'dates'; dates = p.dates.map((x) => x.toISOString());
+    } else {
+      if (b.repeat === 'dates') throw bad('repeat "dates" needs dates_local');
+      due = parseDue(b, tz, true)!;
+    }
     const { data, error } = await db.from('reminders').insert({
       user_id: c.userId, body: str(b.body, 'body', { required: true, max: 2000 }),
-      due_at: due.toISOString(), repeat: repeat(b.repeat) ?? null, source: source(b.source),
+      due_at: due.toISOString(), repeat: rep, dates, source: source(b.source),
     }).select(REM_COLS).single();
     if (error) throw new ApiError(500, 'db_error', 'Could not save reminder');
     return { reminder: withLocal(data, tz), timezone: tz };
@@ -342,7 +475,9 @@ const routes: Record<string, Handler> = {
     const text = str(b.body, 'body', { max: 2000 });
     if (b.body !== undefined) { if (!text) throw bad('body must not be empty'); patch.body = text; }
     const due = parseDue(b, tz, false); if (due) patch.due_at = due.toISOString();
-    const rep = repeat(b.repeat); if (rep !== undefined) patch.repeat = rep;
+    const rep = repeat(b.repeat);
+    if (rep === 'dates') throw bad('To change a reminder to specific dates, use the web app');
+    if (rep !== undefined) { patch.repeat = rep; patch.dates = null; }
     const done = bool(b.done, 'done'); if (done !== undefined) patch.done = done;
     if (!Object.keys(patch).length) throw bad('Nothing to update');
     const { data, error } = await db.from('reminders').update(patch).eq('user_id', c.userId).eq('id', id).select(REM_COLS).maybeSingle();
