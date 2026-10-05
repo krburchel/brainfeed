@@ -140,16 +140,19 @@ cmd_activate() {
   # Exactly one: reconcile it.
   local id state sched dlv script mode
   IFS=$'\t' read -r id state sched dlv script mode <<<"$jobs"
-  if [[ "$script" != "$CRON_SCRIPT_NAME" || ( -n "$mode" && "$mode" != "no-agent" ) ]]; then
-    die "Job $id is named '$JOB' but runs '$script' (mode: ${mode:-?}). Remove it with 'hermes cron remove $id' and re-run activate."
+  # The CLI adds explanations, e.g. "no-agent (script stdout delivered directly)":
+  # compare only the first word of script, mode and delivery target.
+  local script1="${script%% *}" mode1="${mode%% *}" dlv1="${dlv%% *}"
+  if [[ "$script1" != "$CRON_SCRIPT_NAME" || ( -n "$mode1" && "$mode1" != "no-agent" ) ]]; then
+    die "Job $id is named '$JOB' but its script/mode don't match (script: '$script', mode: '${mode:-?}'). Nothing was changed; check it with 'hermes cron list' before deciding what to do."
   fi
   if [[ "$state" != "active" ]]; then
     hermes cron resume "$id" && say "• Resumed job $id (was $state)."
   fi
-  if [[ "$sched" != "$SCHEDULE" ]]; then
+  if [[ "$sched" != "$SCHEDULE" && "$sched" != "$SCHEDULE "* ]]; then
     hermes cron edit "$id" --schedule "$SCHEDULE" && say "• Set job $id schedule to '$SCHEDULE' (was '$sched')."
   fi
-  if [[ "$dlv" != "$deliver" ]]; then
+  if [[ "$dlv1" != "$deliver" ]]; then
     say "• Note: job $id delivers to '$dlv', not '$deliver'. Change it with Hermes's cron edit if you want; leaving it as is."
   fi
   say "• Cron job '$JOB' ($id) is in place."
