@@ -47,7 +47,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 CONFIG_DIR = os.path.expanduser(os.environ.get("BRAINFEED_CONFIG_DIR", "~/.config/brainfeed"))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
@@ -466,8 +466,10 @@ def cmd_deliver(args):
     for r in items:
         late = r.get("late_minutes", 0)
         note = f" (was due {r['due_local']})" if late >= 10 else ""
-        rep = (" · more dates scheduled" if r.get("repeat") == "dates"
-               else f" · repeats {r['repeat']}" if r.get("repeat") else "")
+        if r.get("repeat") == "dates":
+            rep = " · more dates scheduled" if r.get("has_more_dates") else " · last scheduled date"
+        else:
+            rep = f" · repeats {r['repeat']}" if r.get("repeat") else ""
         lines.append(f"⏰ {r['body']}{note}{rep}")
 
     if items:

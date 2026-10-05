@@ -373,15 +373,16 @@ const routes: Record<string, Handler> = {
     only(b, ['id', 'body']);
     const id = uuid(b.id);
     const text = str(b.body, 'body', { required: true })!;
-    const { data: cur } = await db.from('notes').select('body').eq('user_id', c.userId).eq('id', id).maybeSingle();
+    const { data: cur } = await db.from('notes').select('id').eq('user_id', c.userId).eq('id', id).maybeSingle();
     if (!cur) throw new ApiError(404, 'not_found', 'Note not found');
     const tz = await userTz(c.userId);
     const stamp = '— ' + new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
       .format(new Date()).replace(/\s/g, ' ');
-    const body = `${(cur.body as string).replace(/\s+$/, '')}\n\n${stamp}\n${text}`;
-    if (body.length > MAX_BODY) throw bad('Note would be too long');
-    const { data, error } = await db.from('notes').update({ body }).eq('user_id', c.userId).eq('id', id).select(NOTE_COLS).single();
+    // One UPDATE in the database: concurrent appends can't overwrite each other.
+    const { data: rows, error } = await db.rpc('bf_append_note', { p_user: c.userId, p_note: id, p_stamp: stamp, p_text: text });
     if (error) throw new ApiError(500, 'db_error', 'Could not update note');
+    if (!rows?.length) throw bad('Note would be too long');
+    const { data } = await db.from('notes').select(NOTE_COLS).eq('user_id', c.userId).eq('id', id).single();
     return { note: data, message: 'Added to the note ✓' };
   },
 
@@ -430,7 +431,12 @@ const routes: Record<string, Handler> = {
     for (const day of Object.values(out)) {
       (day.reminders as { _t: number }[]).sort((p, q) => p._t - q._t).forEach((x) => delete (x as Record<string, unknown>)._t);
     }
-    return { timezone: tz, from_local: start, days: Object.values(out) };
+    // Open reminders that were due before this range, so "overdue" is complete.
+    const overdue = (rems || [])
+      .filter((r) => !r.done && new Date(r.due_at as string) < from)
+      .sort((p, q) => new Date(p.due_at as string).getTime() - new Date(q.due_at as string).getTime())
+      .map((r) => ({ id: r.id, body: r.body, due_local: fmtLocal(r.due_at as string, tz), repeat: r.repeat }));
+    return { timezone: tz, from_local: start, overdue_before: overdue, days: Object.values(out) };
   },
 
   'POST /v1/reminders': async (c, b) => {
@@ -468,16 +474,30 @@ const routes: Record<string, Handler> = {
   },
 
   'POST /v1/reminders/update': async (c, b) => {
-    only(b, ['id', 'body', 'due_at', 'due_local', 'repeat', 'done']);
+    only(b, ['id', 'body', 'due_at', 'due_local', 'dates_local', 'repeat', 'done']);
     const id = uuid(b.id);
     const tz = await userTz(c.userId);
+    const { data: cur } = await db.from('reminders').select('repeat').eq('user_id', c.userId).eq('id', id).maybeSingle();
+    if (!cur) throw new ApiError(404, 'not_found', 'Reminder not found');
     const patch: Record<string, unknown> = {};
     const text = str(b.body, 'body', { max: 2000 });
     if (b.body !== undefined) { if (!text) throw bad('body must not be empty'); patch.body = text; }
-    const due = parseDue(b, tz, false); if (due) patch.due_at = due.toISOString();
+    const due = parseDue(b, tz, false);
     const rep = repeat(b.repeat);
-    if (rep === 'dates') throw bad('To change a reminder to specific dates, use the web app');
-    if (rep !== undefined) { patch.repeat = rep; patch.dates = null; }
+    if (b.dates_local !== undefined) {
+      // Replace the whole date list at once; due_at becomes its next future date.
+      if (due) throw bad('Send dates_local or a single due time, not both');
+      if (rep !== undefined && rep !== 'dates') throw bad('dates_local cannot be combined with another repeat');
+      const p = parseDatesLocal(b.dates_local, tz);
+      Object.assign(patch, { repeat: 'dates', dates: p.dates.map((x) => x.toISOString()), due_at: p.next.toISOString(), done: false });
+    } else {
+      if (rep === 'dates') throw bad('repeat "dates" needs dates_local (the full list of dates)');
+      if (cur.repeat === 'dates' && rep === undefined && due) {
+        throw bad('This reminder is on specific dates: send dates_local with the full new list instead of a single time');
+      }
+      if (due) patch.due_at = due.toISOString();
+      if (rep !== undefined) { patch.repeat = rep; patch.dates = null; }
+    }
     const done = bool(b.done, 'done'); if (done !== undefined) patch.done = done;
     if (!Object.keys(patch).length) throw bad('Nothing to update');
     const { data, error } = await db.from('reminders').update(patch).eq('user_id', c.userId).eq('id', id).select(REM_COLS).maybeSingle();
@@ -497,7 +517,8 @@ const routes: Record<string, Handler> = {
     return {
       claim_id: data[0]?.claim_id ?? null, timezone: tz,
       reminders: data.map((r: Record<string, unknown>) => ({
-        id: r.id, body: r.body, repeat: r.repeat, due_at: r.due_at, due_local: fmtLocal(r.due_at as string, tz),
+        id: r.id, body: r.body, repeat: r.repeat, has_more_dates: r.has_more_dates === true,
+        due_at: r.due_at, due_local: fmtLocal(r.due_at as string, tz),
         late_minutes: Math.max(0, Math.round((now - new Date(r.due_at as string).getTime()) / 60000)),
       })),
     };

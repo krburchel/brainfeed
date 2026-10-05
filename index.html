@@ -1501,7 +1501,13 @@ async function appendToNote(note, raw) {
   if (!text) return;
   const stamp = '— ' + new Date().toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).replace(/\s/g, ' ');
   state.appending = null;
-  await setNoteBody(note, note.body.replace(/\s+$/, '') + '\n\n' + stamp + '\n' + text);
+  // Optimistic display, then one atomic UPDATE in the database (so an
+  // addition arriving from Hermes at the same moment isn't overwritten).
+  const old = note.body;
+  note.body = note.body.replace(/\s+$/, '') + '\n\n' + stamp + '\n' + text; rerender();
+  const { data, error } = await sb.rpc('append_to_note', { p_note: note.id, p_stamp: stamp, p_text: text });
+  if (error || !data?.length) { note.body = old; rerender(); toast('Couldn\'t add: ' + (error?.message || 'note not found')); return; }
+  replaceNote(data[0]); scheduleTagRefresh();
 }
 
 async function moveNote(note, parentId) {
@@ -1892,7 +1898,7 @@ function remHtml(r) {
         ${r.source !== 'web' ? `<span class="src">${esc(r.source)}</span>` : ''}
       </div>
     </div>
-    ${r.done ? '' : '<button class="tool" data-rem-act="snooze" title="Snooze 1 hour">+1h</button>'}
+    ${r.done || r.repeat === 'dates' ? '' : '<button class="tool" data-rem-act="snooze" title="Snooze 1 hour">+1h</button>'}
     ${r.done || r.repeat === 'dates' ? '' : `<button class="tool" data-rem-act="move" title="Move to another day">${ICON.move}</button>`}
     <button class="tool" data-rem-act="edit" title="Edit">${ICON.edit}</button>
     <button class="tool" data-rem-act="delete" title="Delete">${ICON.trash}</button>

@@ -481,6 +481,54 @@ class CalendarAndNotes13(unittest.TestCase):
         self.assertIn("400", self.call({"op": "calendar", "from_local": "next week"}, check=False).stderr)
 
 
+class Review131(unittest.TestCase):
+    """Fixes from Hermes's 1.3 review."""
+
+    def call(self, obj, name="r131.json", check=True):
+        inbox = os.path.join(DIR_A, "inbox")
+        os.makedirs(inbox, mode=0o700, exist_ok=True)
+        with open(os.path.join(inbox, name), "w") as f:
+            json.dump(obj, f)
+        p = run("call", name, check=check)
+        return json.loads(p.stdout) if p.returncode == 0 else p
+
+    def day(self, n):
+        today = datetime.strptime(self.call({"op": "calendar", "days": 1})["from_local"], "%Y-%m-%d")
+        return (today + timedelta(days=n)).strftime("%Y-%m-%d")
+
+    def test_dates_reminder_cannot_be_split(self):
+        r = self.call({"op": "add_reminder", "body": "split " + os.urandom(3).hex(),
+                       "dates_local": [f"{self.day(3)}T18:30", f"{self.day(9)}T18:30"]})["reminder"]
+        p = self.call({"op": "edit_reminder", "id": r["id"], "due_local": f"{self.day(5)}T10:00"}, check=False)
+        self.assertIn("400", p.stderr)
+        self.assertIn("dates_local", p.stderr)
+        e = self.call({"op": "edit_reminder", "id": r["id"], "dates_local": [f"{self.day(4)}T08:00", f"{self.day(6)}T08:00", f"{self.day(8)}T08:00"]})["reminder"]
+        self.assertEqual(len(e["dates"]), 3)
+        self.assertEqual(e["due_at"], e["dates"][0])
+        o = self.call({"op": "edit_reminder", "id": r["id"], "repeat": "none"})["reminder"]
+        self.assertIsNone(o["repeat"]); self.assertIsNone(o["dates"])
+
+    def test_concurrent_appends_are_all_kept(self):
+        import concurrent.futures
+        n = j("add", "concurrency log " + os.urandom(3).hex())["note"]
+        def one(i):
+            inbox = os.path.join(DIR_A, "inbox")
+            with open(os.path.join(inbox, f"ap{i}.json"), "w") as f:
+                json.dump({"op": "append_note", "id": n["id"], "body": f"entry-{i}"}, f)
+            return run("call", f"ap{i}.json").returncode
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            self.assertEqual(list(ex.map(one, range(8))), [0] * 8)
+        body = j("get", n["id"])["note"]["body"]
+        self.assertEqual(sorted(x for x in body.split() if x.startswith("entry-")), sorted(f"entry-{i}" for i in range(8)))
+
+    def test_calendar_lists_overdue_before_range(self):
+        name = "old overdue " + os.urandom(3).hex()
+        self.call({"op": "add_reminder", "body": name, "due_local": f"{self.day(-3)}T09:00"})
+        cal = self.call({"op": "calendar", "days": 2})
+        self.assertIn(name, [x["body"] for x in cal["overdue_before"]])
+        run("deliver")  # tidy: deliver it so it doesn't linger as overdue
+
+
 class Outage(unittest.TestCase):
     """Delivery failures are silent at first, alert once, then recover once."""
 

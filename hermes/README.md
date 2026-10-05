@@ -103,11 +103,11 @@ are rejected. Errors come back as `{"error": code, "message": text}` with 400 / 
 | `POST /v1/notes/search` | `q?` (words AND-ed, `#tag` filters), `tags?[]`, `pinned?`, `limit?` ≤50, `before?` ISO | `notes[]` newest first |
 | `POST /v1/notes/get` | `id` | `note` |
 | `POST /v1/notes/update` | `id`, `body?`, `add_tags?[]`, `remove_tags?[]`, `pinned?`, `archived?` (true hides from the feed, false restores) | `note` (hashtags re-derived from a new body; manual tags kept) |
-| `POST /v1/notes/append` | `id`, `body` | `note` with `\n\n— Oct 4, 8:30 PM\n<body>` added (stamp in the user's zone, built server-side) |
-| `POST /v1/calendar` | `from_local?` (`YYYY-MM-DD`, default today), `days?` 1–31 (default 7) | `days[]`: `date`, `weekday`, `reminders[]` (`time_local`, `repeat`, `status`: scheduled / overdue / repeat / done) and `notes[]` (`first_line`). Repeats expanded with the same wall-clock, anchored, month-end-clamped rules as delivery |
+| `POST /v1/notes/append` | `id`, `body` | `note` with `\n\n— Oct 4, 8:30 PM\n<body>` added (stamp in the user's zone, built server-side). A single database UPDATE (`bf_append_note`), so concurrent appends never overwrite each other |
+| `POST /v1/calendar` | `from_local?` (`YYYY-MM-DD`, default today), `days?` 1–31 (default 7) | `overdue_before[]` (open reminders due before the range) and `days[]`: `date`, `weekday`, `reminders[]` (`time_local`, `repeat`, `status`: scheduled / overdue / repeat / done) and `notes[]` (non-archived, `first_line`). Repeats expanded with the same wall-clock, anchored, month-end-clamped rules as delivery |
 | `POST /v1/reminders` | `body` (≤2k), `due_at` (ISO **with** offset) **or** `due_local` (`YYYY-MM-DDTHH:MM` in the user's zone) **or** `dates_local` (list of 1–100 local times, at least one in the future; stored as repeat `dates`), `repeat?`, `source?` | `reminder` with `due_local` |
 | `POST /v1/reminders/search` | `q?`, `include_done?`, `limit?` ≤100 | `reminders[]` soonest first |
-| `POST /v1/reminders/update` | `id`, `body?`, `due_at?`/`due_local?`, `repeat?` (`none` clears), `done?` | `reminder` |
+| `POST /v1/reminders/update` | `id`, `body?`, `due_at?`/`due_local?`, `dates_local?` (replaces a specific-dates list atomically), `repeat?` (`none` clears), `done?`. A single time on a specific-dates reminder is rejected | `reminder` |
 | `POST /v1/reminders/claim` | `limit?` ≤50, `lease_seconds?` 30–3600 | `claim_id`, `reminders[]` with `late_minutes` |
 | `POST /v1/reminders/ack` | `claim_id` | `acked`, updated `reminders[]` |
 | `POST /v1/token/revoke` | – | revokes the presented token |
@@ -144,6 +144,8 @@ with at most 10 per note. If storing a photo fails, a note created for it is rem
   warning immediately.
 - **Recurring:** `daily`, `weekdays` (Mon–Fri), `weekly`, `monthly`, `yearly`, or `dates`
   (a list of specific dates: delivery steps to the next listed date and finishes after the last).
+  A database trigger keeps a `dates` reminder's `due_at` on one of its dates whatever changes it,
+  and claims return `has_more_dates` so the last delivery doesn't promise more.
 - **Editing a delivered reminder:** changing its time to the future reactivates it. Editing
   only the text does not.
 

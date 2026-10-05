@@ -30,13 +30,44 @@ INSTALLED_SETUP="$SKILL_DIR/scripts/setup.sh"
 say() { printf '%s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 helper() { BRAINFEED_CONFIG_DIR="$CFG_DIR" python3 "$HELPER" "$@"; }
-job_exists() {
-  # Capture first, then match: piping into "grep -q" lets grep exit early, hermes
-  # then dies of SIGPIPE while printing trailing warnings, and pipefail turns a
-  # real match into "not found".
-  local out
-  out="$(hermes cron list 2>/dev/null || true)"
-  grep -qw -- "$JOB" <<<"$out"
+# Jobs named exactly $JOB, one per line: id<TAB>state<TAB>schedule<TAB>deliver<TAB>script<TAB>mode
+# Parses `hermes cron list` blocks like:
+#   f047a1d5e91b [active]
+#   Name:      brainfeed-reminders
+#   Schedule:  every 2m
+#   ...
+# Returns 3 if the list can't be obtained or can't be read, so callers never
+# mistake "unknown" for "no job" (which could create a duplicate).
+cron_jobs() {
+  local out rc
+  out="$(hermes cron list 2>&1)" && rc=0 || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    printf 'hermes cron list failed (exit %s):\n%s\n' "$rc" "$out" >&2
+    return 3
+  fi
+  local parsed
+  parsed="$(JOB="$JOB" python3 -c '
+import os, re, sys
+job, cur, jobs = os.environ["JOB"], None, []
+for line in sys.stdin.read().splitlines():
+    m = re.match(r"^\s*([0-9a-f]{6,})\s+\[([A-Za-z_-]+)\]", line)
+    if m:
+        cur = {"id": m.group(1), "state": m.group(2).lower()}
+        jobs.append(cur)
+        continue
+    m = re.match(r"^\s*([A-Za-z][A-Za-z ]*?):\s*(.*?)\s*$", line)
+    if m and cur is not None:
+        cur.setdefault(m.group(1).strip().lower(), m.group(2))
+for j in jobs:
+    if j.get("name") == job:
+        print("\t".join([j["id"], j["state"], j.get("schedule", ""), j.get("deliver", ""), j.get("script", ""), j.get("mode", "")]))
+' <<<"$out")" || return 3
+  # The name appears but no block parsed: the list format is not what we expect.
+  if [[ -z "$parsed" ]] && grep -Eq "(^|[^A-Za-z0-9_-])${JOB}([^A-Za-z0-9_-]|$)" <<<"$out"; then
+    printf 'Could not read hermes cron list output; refusing to guess.\n' >&2
+    return 3
+  fi
+  printf '%s' "$parsed"
 }
 confirm() { # confirm "question" default(y|n); no terminal => safe "no"
   [[ -t 0 ]] || return 1
@@ -95,18 +126,44 @@ cmd_activate() {
   local deliver="${1:-telegram}"
   [[ "$deliver" =~ ^[a-z]+(:[^,]+)?(,[a-z]+(:[^,]+)?)*$ ]] || die "invalid --deliver target"
   helper status || die "BrainFeed rejected the token. Is the fingerprint added in Settings → Connected agents?"
-  if job_exists; then
-    say "• Cron job '$JOB' already exists; leaving it as is."
-  else
+  local jobs
+  jobs="$(cron_jobs)" || die "Couldn't list cron jobs reliably; not creating or changing anything."
+  local count; count=$(grep -c . <<<"$jobs" || true)
+  if [[ "$count" -gt 1 ]]; then
+    die "Found $count jobs named '$JOB' ($(cut -f1 <<<"$jobs" | tr '\n' ' ')). Remove the extras with 'hermes cron remove <id>', then re-run activate."
+  fi
+  if [[ "$count" -eq 0 ]]; then
     hermes cron create "$SCHEDULE" --no-agent --script "$CRON_SCRIPT_NAME" --deliver "$deliver" --name "$JOB"
     say "• Created cron job '$JOB' ($SCHEDULE, delivering to $deliver)."
+    return
   fi
+  # Exactly one: reconcile it.
+  local id state sched dlv script mode
+  IFS=$'\t' read -r id state sched dlv script mode <<<"$jobs"
+  if [[ "$script" != "$CRON_SCRIPT_NAME" || ( -n "$mode" && "$mode" != "no-agent" ) ]]; then
+    die "Job $id is named '$JOB' but runs '$script' (mode: ${mode:-?}). Remove it with 'hermes cron remove $id' and re-run activate."
+  fi
+  if [[ "$state" != "active" ]]; then
+    hermes cron resume "$id" && say "• Resumed job $id (was $state)."
+  fi
+  if [[ "$sched" != "$SCHEDULE" ]]; then
+    hermes cron edit "$id" --schedule "$SCHEDULE" && say "• Set job $id schedule to '$SCHEDULE' (was '$sched')."
+  fi
+  if [[ "$dlv" != "$deliver" ]]; then
+    say "• Note: job $id delivers to '$dlv', not '$deliver'. Change it with Hermes's cron edit if you want; leaving it as is."
+  fi
+  say "• Cron job '$JOB' ($id) is in place."
 }
 
 cmd_status() {
   [[ -f "$SKILL_DIR/SKILL.md" ]] && say "skill:    installed ($(grep -m1 '^version:' "$SKILL_DIR/SKILL.md"))" || say "skill:    not installed"
   [[ -x "$CRON_SCRIPT" ]] && say "script:   $CRON_SCRIPT" || say "script:   missing"
-  if command -v hermes >/dev/null && job_exists; then say "cron job: $JOB present"; else say "cron job: not found"; fi
+  if command -v hermes >/dev/null; then
+    local jobs; if jobs="$(cron_jobs)"; then
+      if [[ -n "$jobs" ]]; then while IFS=$'\t' read -r id state sched dlv script mode; do say "cron job: $id [$state] $sched → $dlv ($script, $mode)"; done <<<"$jobs"
+      else say "cron job: not found"; fi
+    else say "cron job: unknown (couldn't list jobs)"; fi
+  else say "cron job: hermes CLI not found"; fi
   if [[ -f "$CFG_DIR/token" ]]; then
     say "token:    $(helper fingerprint)"
     helper status || true
@@ -122,7 +179,15 @@ cmd_test() {
   helper search --limit 1 >/dev/null && say "  search works ✓"
   say "• Reminder list:"
   helper reminders --limit 3
-  if job_exists; then say "• Cron job '$JOB' is registered ✓ (to see runs: find its ID with 'hermes cron list', then 'hermes cron runs <id>')"; else say "• Cron job '$JOB' not registered (run: setup.sh activate)"; fi
+  local jobs
+  if ! jobs="$(cron_jobs)"; then say "• Couldn't list cron jobs reliably (see message above)"
+  elif [[ -z "$jobs" ]]; then say "• Cron job '$JOB' not registered (run: setup.sh activate)"
+  else
+    local n; n=$(grep -c . <<<"$jobs")
+    local id; id=$(head -1 <<<"$jobs" | cut -f1)
+    if [[ "$n" -gt 1 ]]; then say "• WARNING: $n jobs named '$JOB' ($(cut -f1 <<<"$jobs" | tr '\n' ' '))"
+    else say "• Cron job '$JOB' is registered ✓ ($(head -1 <<<"$jobs" | cut -f2,3,4 | tr '\t' ' ')). Run history: hermes cron runs $id"; fi
+  fi
 }
 
 cmd_uninstall() {
@@ -132,8 +197,13 @@ cmd_uninstall() {
     --delete-config) delcfg=y ;; --keep-config) delcfg=n ;;
     *) die "unknown uninstall option: $a" ;;
   esac; done
-  if command -v hermes >/dev/null && job_exists; then
-    hermes cron remove "$JOB" && say "• Removed cron job '$JOB'"
+  if command -v hermes >/dev/null; then
+    local jobs
+    if jobs="$(cron_jobs)"; then
+      for id in $(cut -f1 <<<"$jobs"); do hermes cron remove "$id" && say "• Removed cron job $id ('$JOB')"; done
+    else
+      say "• Couldn't list cron jobs; remove '$JOB' yourself with 'hermes cron list' then 'hermes cron remove <id>'"
+    fi
   fi
   if [[ -z "$revoke" ]]; then confirm "Revoke this token on the BrainFeed server too? [Y/n]" y && revoke=y || revoke=n; fi
   if [[ "$revoke" == y && -f "$CFG_DIR/token" && -f "$HELPER" ]]; then

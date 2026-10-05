@@ -1,7 +1,7 @@
 ---
 name: brainfeed
 description: Save, search and edit Kevin's BrainFeed notes and reminders (a private "feed for your brain"). Use when Kevin says chuck/save/note/jot this, asks what was saved about something, or asks for a reminder.
-version: 1.3.0
+version: 1.3.1
 platforms: [linux, macos]
 metadata:
   hermes:
@@ -52,14 +52,14 @@ file name.
 | `add_note` | `body` (Kevin's words, verbatim), `tags` (optional list), `source`: `"telegram"` or `"discord"` |
 | `search_notes` | `q` (words AND-ed; `#tag` filters), `tags`, `pinned`, `limit` (≤50) |
 | `get_note` | `id` |
-| `edit_note` | `id`, and any of `body`, `add_tags`, `remove_tags`, `pinned`, `archived` (true hides it from the feed; false brings it back) |
+| `edit_note` | `id`, and any of `body`, `add_tags`, `remove_tags`, `pinned`, `archived` (true hides it from the feed and calendar; false brings it back). Archived notes still appear in `search_notes` results, with `archived_at` set |
 | `append_note` | `id`, `body`: adds a time-stamped entry ("— Oct 4, 8:30 PM") to the end of an existing note |
-| `calendar` | `from_local` (`"YYYY-MM-DD"`, default today), `days` (1–31, default 7): each day's reminders (with repeats worked out, `status` scheduled/overdue/repeat/done) and notes created that day |
+| `calendar` | `from_local` (`"YYYY-MM-DD"`, default today), `days` (1–31, default 7): each day's reminders (with repeats worked out, `status` scheduled/overdue/repeat/done) and non-archived notes created that day, plus `overdue_before`: open reminders that were due before `from_local` |
 | `add_note` + photos | as `add_note`, plus `photos`: list of image file names in `INBOX` (`body` optional: defaults to "📷 Photo") |
 | `attach_photos` | `id`, `photos` (adds images to an existing note) |
 | `add_reminder` | `body`, `due_local` (`"YYYY-MM-DDTHH:MM"` in BrainFeed's time zone), `repeat` (optional: `daily`, `weekdays`, `weekly`, `monthly`, `yearly`), `source`. For several specific dates instead, send `dates_local`: a list of `"YYYY-MM-DDTHH:MM"` (no `due_local`) |
 | `list_reminders` | `q`, `include_done`, `limit` |
-| `edit_reminder` | `id`, and any of `body`, `due_local`, `repeat` (`"none"` clears), `done` |
+| `edit_reminder` | `id`, and any of `body`, `due_local`, `repeat` (`"none"` clears), `done`. For a specific-dates reminder, change times with `dates_local` (the **full** new list); a single `due_local` is rejected |
 
 Examples of file contents:
 
@@ -87,8 +87,9 @@ Only JPEG, PNG, GIF and WebP are accepted (max 10 MB, up to 10 per note). For ot
 (HEIC, PDF, video), tell Kevin to use the web app.
 
 **Formatting notes.** BrainFeed shows plain-text conventions nicely, so use them when they fit:
-- Checklists: one item per line as `- [ ] item` (done items `- [x] item`). Use this whenever
-  Kevin asks for a list, groceries, to-dos or steps.
+- Checklists: one item per line as `- [ ] item` (done items `- [x] item`). Use this only when
+  Kevin asks for a checklist or to-do list, or dictates separate items to tick off. Keep each
+  item's wording exactly as Kevin gave it; only the `- [ ] ` prefix is added.
 - Headings: `# Title` or `## Section` at the start of a line (a space after the #).
 - To add to an existing log-style note, use `append_note` rather than editing the whole body.
 
@@ -98,9 +99,13 @@ Only JPEG, PNG, GIF and WebP are accepted (max 10 MB, up to 10 per note). For ot
 
 **Editing.** Search first. If more than one note matches, confirm which one before editing.
 
-**Calendar.** For "what's on my calendar", call `calendar` (for "this week", `days: 7`; for a
-specific day, that day's `from_local` with `days: 1`). Summarize by day with times; mention
-overdue items first.
+**Calendar.** Pick the range from what Kevin said, using `status` → `now_local` for today:
+- "this week": the current calendar week, Sunday through Saturday, so `from_local` = today and
+  `days` = days left until Saturday, inclusive (say so if you start from today rather than Sunday).
+- "next 7 days" / "coming week": `from_local` = today, `days: 7`.
+- a specific day: that date with `days: 1`.
+Mention anything in `overdue_before` (and items with `status: overdue`) first, then go day by
+day with times. Repeats show as `status: repeat`.
 
 **Reminders.** Run `HELPER status --json` first to get `timezone` and `now_local`, and compute
 `due_local` in **that** time zone. Confirm back using the `due_local` the result returns.
