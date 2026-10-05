@@ -399,7 +399,7 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSe
 const state = {
   user: null, view: 'feed',
   notes: [], hasMore: false, loading: false,
-  tag: null, pinned: false, query: '',
+  tag: null, pinned: false, archived: false, archivedCount: 0, query: '',
   tags: [], settings: null, reminders: [],
   files: [], remindMode: false, editing: null,
   boardNotes: {}, boardPicking: false, pickTags: [],
@@ -565,7 +565,7 @@ function onNoteChange({ eventType, new: row, old }) {
     if (!state.notes.some((n) => n.id === row.id) && matchesFilter(row)) state.notes.unshift(row);
   } else if (eventType === 'UPDATE') {
     const i = state.notes.findIndex((n) => n.id === row.id);
-    if (i >= 0) state.notes[i] = row;
+    if (i >= 0) { if (matchesFilter(row)) state.notes[i] = row; else state.notes.splice(i, 1); }
   }
   if (state.editing == null) { renderFeed(); if (state.view === 'board') loadBoard(); }
   scheduleTagRefresh();
@@ -587,6 +587,8 @@ function parseQuery(q) {
 }
 
 function matchesFilter(n) {
+  // Archived notes only show in the Archived view, or when searching.
+  if (state.archived ? !n.archived_at : (n.archived_at && !state.query)) return false;
   if (state.tag && !n.tags.includes(state.tag)) return false;
   if (state.pinned && !n.pinned) return false;
   const { words, tags } = parseQuery(state.query);
@@ -600,8 +602,10 @@ async function loadNotes(reset) {
   state.loading = true;
   if (reset) renderStatus(true);
   const offset = reset ? 0 : state.notes.length;
-  let q = sb.from('notes').select('id,body,tags,source,pinned,attachments,created_at,updated_at')
+  let q = sb.from('notes').select('id,body,tags,source,pinned,attachments,archived_at,created_at,updated_at')
     .order('created_at', { ascending: false }).range(offset, offset + PAGE - 1);
+  if (state.archived) q = q.not('archived_at', 'is', null);
+  else if (!state.query) q = q.is('archived_at', null);
   if (state.tag) q = q.contains('tags', [state.tag]);
   if (state.pinned) q = q.eq('pinned', true);
   const { words, tags } = parseQuery(state.query);
@@ -615,13 +619,13 @@ async function loadNotes(reset) {
   }
   state.notes = reset ? data : state.notes.concat(data);
   state.hasMore = data.length === PAGE;
-  if (!state.tag && !state.pinned && !state.query) lsSet(LS.cache, { uid: state.user.id, notes: state.notes.slice(0, PAGE) });
+  if (!state.tag && !state.pinned && !state.archived && !state.query) lsSet(LS.cache, { uid: state.user.id, notes: state.notes.slice(0, PAGE) });
   renderFeed();
 }
 
 async function loadTags() {
-  const { data, error } = await sb.rpc('tag_counts');
-  if (!error) { state.tags = data; renderTags(); }
+  const [{ data, error }, { data: archived }] = await Promise.all([sb.rpc('tag_counts'), sb.rpc('archived_count')]);
+  if (!error) { state.tags = data; state.archivedCount = Number(archived) || 0; renderTags(); }
 }
 
 async function loadSettings() {
@@ -783,6 +787,7 @@ const ICON = {
   copy: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V5a2 2 0 0 1 2-2h11"/></svg>',
   edit: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.4 3.6a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>',
   bell: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>',
+  archive: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>',
   trash: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
   file: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>',
   check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
@@ -809,12 +814,14 @@ function noteHtml(n, compact = false) {
       ${n.source && n.source !== 'web' ? `<span class="src">${esc(n.source)}</span>` : ''}
       ${n._queued ? '<span class="src">waiting to sync</span>' : ''}
       ${n.pinned ? `<span style="color:var(--accent)">${ICON.pin}</span>` : ''}
+      ${n.archived_at ? '<span class="src">archived</span>' : ''}
       <span class="spacer"></span>
       <span class="note-actions">
         <button class="tool${n.pinned ? ' pin-on' : ''}" data-act="pin" title="${n.pinned ? 'Unpin' : 'Pin'}">${ICON.pin}</button>
         <button class="tool" data-act="copy" title="Copy">${ICON.copy}</button>
         ${compact ? '' : `<button class="tool" data-act="remind" title="Remind me about this">${ICON.bell}</button>`}
         <button class="tool" data-act="edit" title="Edit">${ICON.edit}</button>
+        <button class="tool" data-act="archive" title="${n.archived_at ? 'Unarchive' : 'Archive'}">${ICON.archive}</button>
         <button class="tool" data-act="delete" title="Delete">${ICON.trash}</button>
       </span>
     </div>
@@ -825,7 +832,9 @@ function renderFeed() {
   const feed = $('#feed');
   if (!state.notes.length) {
     const filtered = state.tag || state.pinned || state.query;
-    feed.innerHTML = state.loading ? '' : `<div class="empty"><strong>${filtered ? 'Nothing matches' : 'Your feed is empty'}</strong>${filtered ? 'Try a different search or tag.' : 'Type a thought above and hit Enter. Add #tags to file it.'}</div>`;
+    feed.innerHTML = state.loading ? '' : state.archived && !filtered
+      ? '<div class="empty"><strong>No archived notes</strong>Use the box icon on a note to archive it. It leaves your feed but stays searchable.</div>'
+      : `<div class="empty"><strong>${filtered ? 'Nothing matches' : 'Your feed is empty'}</strong>${filtered ? 'Try a different search or tag.' : 'Type a thought above and hit Enter. Add #tags to file it.'}</div>`;
   } else {
     let html = '', lastDay = '';
     for (const n of state.notes) {
@@ -849,6 +858,7 @@ function renderStatus(loading) {
   if (q) bits.push(`${q} note${q > 1 ? 's' : ''} waiting to sync`);
   if (state.tag) bits.push(`Showing <button class="hashtag" data-tag="${esc(state.tag)}">#${esc(state.tag)}</button> <button class="btn ghost small" data-act="clear">Clear</button>`);
   else if (state.pinned) bits.push('Showing pinned notes <button class="btn ghost small" data-act="clear">Clear</button>');
+  else if (state.archived) bits.push('Showing archived notes <button class="btn ghost small" data-act="clear">Clear</button>');
   if (state.query && !loading) bits.push(`${state.notes.length}${state.hasMore ? '+' : ''} result${state.notes.length === 1 ? '' : 's'}`);
   el.innerHTML = bits.join(' ');
   el.classList.toggle('hidden', !bits.length);
@@ -856,8 +866,9 @@ function renderStatus(loading) {
 
 function renderTags() {
   const total = state.tags.reduce((a, t) => a + Number(t.count), 0);
-  let html = `<button class="tag-item${!state.tag && !state.pinned ? ' active' : ''}" data-filter="all"><span>All notes</span></button>`;
+  let html = `<button class="tag-item${!state.tag && !state.pinned && !state.archived ? ' active' : ''}" data-filter="all"><span>All notes</span></button>`;
   html += `<button class="tag-item${state.pinned ? ' active' : ''}" data-filter="pinned"><span>Pinned</span></button>`;
+  html += `<button class="tag-item${state.archived ? ' active' : ''}" data-filter="archived"><span>Archived</span>${state.archivedCount ? `<span class="n">${state.archivedCount}</span>` : ''}</button>`;
   for (const t of state.tags) {
     html += `<button class="tag-item${state.tag === t.tag ? ' active' : ''}" data-tag="${esc(t.tag)}"><span>#${esc(t.tag)}</span><span class="n">${t.count}</span></button>`;
   }
@@ -943,7 +954,7 @@ document.addEventListener('click', async (e) => {
   const tagBtn = e.target.closest('[data-tag]');
   if (tagBtn && !e.target.closest('.board-picker')) { setFilter({ tag: tagBtn.dataset.tag }); return; }
   const f = e.target.closest('[data-filter]');
-  if (f) { setFilter(f.dataset.filter === 'pinned' ? { pinned: true } : {}); return; }
+  if (f) { setFilter(f.dataset.filter === 'pinned' ? { pinned: true } : f.dataset.filter === 'archived' ? { archived: true } : {}); return; }
   const actEl = e.target.closest('[data-act]');
   if (!actEl) return;
   const act = actEl.dataset.act;
@@ -969,10 +980,35 @@ document.addEventListener('click', async (e) => {
     state.editing = null; rerender();
   } else if (act === 'save') {
     await saveEdit(note);
+  } else if (act === 'archive') {
+    archiveNote(note, !note.archived_at);
   } else if (act === 'delete') {
     deleteNote(note);
   }
 });
+
+async function archiveNote(note, archive, quiet = false) {
+  const prev = note.archived_at;
+  const archived_at = archive ? new Date().toISOString() : null;
+  note.archived_at = archived_at;
+  const idx = state.notes.findIndex((n) => n.id === note.id);
+  if (idx >= 0 && !matchesFilter(note)) state.notes.splice(idx, 1);
+  if (archive) for (const k in state.boardNotes) state.boardNotes[k] = state.boardNotes[k].filter((n) => n.id !== note.id);
+  rerender();
+  const { error } = await sb.from('notes').update({ archived_at }).eq('id', note.id);
+  if (error) {
+    note.archived_at = prev;
+    toast('Couldn\'t ' + (archive ? 'archive' : 'unarchive') + ': ' + error.message);
+    loadNotes(true); if (state.view === 'board') loadBoard();
+    return;
+  }
+  scheduleTagRefresh();
+  if (state.view === 'board' && !archive) loadBoard();
+  if (!quiet) toast(archive ? 'Note archived' : 'Note moved back to your feed', 'Undo', async () => {
+    await archiveNote(note, !archive, true);
+    if (matchesFilter(note) && !state.notes.some((n) => n.id === note.id)) loadNotes(true);
+  });
+}
 
 document.addEventListener('keydown', (e) => {
   if (e.target.id === 'edit-text') {
@@ -1005,7 +1041,7 @@ function deleteNote(note) {
     undone = true;
     await del;
     const { _queued, ...row } = note;
-    const { data, error } = await sb.from('notes').insert({ id: row.id, body: row.body, tags: row.tags, source: row.source, pinned: row.pinned, attachments: row.attachments, created_at: row.created_at }).select().single();
+    const { data, error } = await sb.from('notes').insert({ id: row.id, body: row.body, tags: row.tags, source: row.source, pinned: row.pinned, attachments: row.attachments, archived_at: row.archived_at ?? null, created_at: row.created_at }).select().single();
     if (error) { toast('Couldn\'t restore: ' + error.message); return; }
     state.notes.splice(Math.max(0, idx), 0, data); renderFeed(); scheduleTagRefresh();
     if (state.view === 'board') loadBoard();
@@ -1027,8 +1063,8 @@ function openLightbox(src) {
 // ------------------------------------------------------------------
 // Filters, search, views
 // ------------------------------------------------------------------
-function setFilter({ tag = null, pinned = false }) {
-  state.tag = tag; state.pinned = pinned;
+function setFilter({ tag = null, pinned = false, archived = false }) {
+  state.tag = tag; state.pinned = pinned; state.archived = archived;
   if (state.view !== 'feed') switchView('feed');
   renderTags(); loadNotes(true);
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -1084,7 +1120,7 @@ $('#menu').addEventListener('click', async (e) => {
 async function exportNotes() {
   const all = []; let from = 0;
   for (;;) {
-    const { data, error } = await sb.from('notes').select('id,body,tags,source,pinned,attachments,created_at,updated_at').order('created_at').range(from, from + 999);
+    const { data, error } = await sb.from('notes').select('id,body,tags,source,pinned,attachments,archived_at,created_at,updated_at').order('created_at').range(from, from + 999);
     if (error) { toast('Export failed: ' + error.message); return; }
     all.push(...data); if (data.length < 1000) break; from += 1000;
   }
@@ -1102,7 +1138,7 @@ async function exportNotes() {
 async function loadBoard() {
   const cols = state.settings?.board_tags || [];
   if (cols.length < 2) { state.boardPicking = true; state.pickTags = [...cols]; renderBoard(); return; }
-  const results = await Promise.all(cols.map((t) => sb.from('notes').select('id,body,tags,source,pinned,attachments,created_at').contains('tags', [t]).order('pinned', { ascending: false }).order('created_at', { ascending: false }).limit(100)));
+  const results = await Promise.all(cols.map((t) => sb.from('notes').select('id,body,tags,source,pinned,attachments,created_at').contains('tags', [t]).is('archived_at', null).order('pinned', { ascending: false }).order('created_at', { ascending: false }).limit(100)));
   cols.forEach((t, i) => { state.boardNotes[t] = results[i].data || []; });
   renderBoard();
 }
