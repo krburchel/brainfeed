@@ -243,6 +243,18 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
 .picker-list button:hover { border-color: var(--accent); }
 
 /* ---------- Board ---------- */
+.column.drop { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--accent-soft); }
+.column.archive-zone { background: transparent; border: 2px dashed var(--border); align-items: center; justify-content: center; color: var(--muted); text-align: center; font-size: 13px; gap: 6px; }
+.column.archive-zone svg { width: 22px; height: 22px; }
+.board.moving .column { cursor: pointer; }
+.board.moving .column:hover { outline: 2px solid var(--accent); outline-offset: -2px; }
+#view-board article.note[draggable="true"] { cursor: grab; }
+.column .note-meta { flex-wrap: wrap; }
+.column .note-meta > span:first-child { white-space: nowrap; }
+.column .note-actions { display: none; }
+.column .note:hover .note-actions, .column .note:focus-within .note-actions { display: flex; }
+@media (hover: none) { .column .note-actions { display: flex; } }
+#view-board article.note.dragging { opacity: .4; }
 .board-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 .board-head h2 { margin: 0; font-size: 18px; }
 .board-picker { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 14px; }
@@ -521,7 +533,7 @@ const state = {
   remEditing: null, cal: { month: null, selected: null, notes: [], mode: 'month', moving: null }, dp: {},
   tags: [], settings: null, reminders: [],
   files: [], remindMode: false, editing: null,
-  boardNotes: {}, boardPicking: false, pickTags: [],
+  boardNotes: {}, boardPicking: false, pickTags: [], boardMoving: null,
   agents: [],
 };
 
@@ -1656,7 +1668,7 @@ async function exportNotes() {
 async function loadBoard() {
   const cols = state.settings?.board_tags || [];
   if (cols.length < 2) { state.boardPicking = true; state.pickTags = [...cols]; renderBoard(); return; }
-  const results = await Promise.all(cols.map((t) => sb.from('notes').select('id,body,tags,source,pinned,attachments,created_at').contains('tags', [t]).is('archived_at', null).order('pinned', { ascending: false }).order('created_at', { ascending: false }).limit(100)));
+  const results = await Promise.all(cols.map((t) => sb.from('notes').select(NOTE_SELECT).contains('tags', [t]).is('archived_at', null).order('pinned', { ascending: false }).order('created_at', { ascending: false }).limit(100)));
   cols.forEach((t, i) => { state.boardNotes[t] = results[i].data || []; });
   renderBoard();
 }
@@ -1671,12 +1683,17 @@ function renderBoard() {
       <button class="btn small" data-board="save" ${state.pickTags.length < 2 ? 'disabled' : ''}>Save columns (${state.pickTags.length}/5)</button>
       ${cols.length >= 2 ? '<button class="btn ghost small" data-board="cancel">Cancel</button>' : ''}</div>`;
   } else {
-    html += '<div class="board">' + cols.map((t) => {
+    const mv = state.boardMoving;
+    if (mv) html += `<div class="move-banner"><span>Tap a column to move "${esc(firstLine(mv.note.body).slice(0, 40))}" (or Archive)</span><button data-board="move-cancel">Cancel</button></div>`;
+    const card = (n, t) => noteHtml(n, true)
+      .replace('<article class="note', '<article draggable="true" class="note')
+      .replace('<button class="tool" data-act="archive"', `<button class="tool" data-act="board-move" data-from="${esc(t)}" title="Move to another column">${ICON.move}</button><button class="tool" data-act="archive"`);
+    html += `<div class="board${mv ? ' moving' : ''}">` + cols.map((t) => {
       const notes = state.boardNotes[t] || [];
-      return `<div class="column"><h4>#${esc(t)} <span>${notes.length}</span></h4>
+      return `<div class="column" data-col="${esc(t)}"><h4>#${esc(t)} <span>${notes.length}</span></h4>
         <input class="field quick" data-quickadd="${esc(t)}" placeholder="Add to #${esc(t)}…">
-        <div class="column-list">${notes.map((n) => noteHtml(n, true)).join('') || '<div class="empty" style="padding:24px 8px">Empty</div>'}</div></div>`;
-    }).join('') + '</div>';
+        <div class="column-list">${notes.map((n) => card(n, t)).join('') || '<div class="empty" style="padding:24px 8px">Empty</div>'}</div></div>`;
+    }).join('') + `<div class="column archive-zone" data-col="__archive">${ICON.archive}<div><strong>Archive</strong><br>Drop a card here to archive it</div></div></div>`;
   }
   withAddFocus(() => { el.innerHTML = html; });
   hydrateAttachments(el);
@@ -1690,6 +1707,17 @@ $('#view-board').addEventListener('click', async (e) => {
     renderBoard(); return;
   }
   const b = e.target.closest('[data-board]')?.dataset.board;
+  if (b === 'move-cancel') { state.boardMoving = null; renderBoard(); return; }
+  if (state.boardMoving && !b) {
+    const col = e.target.closest('[data-col]');
+    if (col) { const { note, from } = state.boardMoving; state.boardMoving = null; moveCardToColumn(note, from, col.dataset.col); return; }
+  }
+  const mvBtn = e.target.closest('[data-act="board-move"]');
+  if (mvBtn) {
+    const note = findNote(mvBtn.closest('[data-id]').dataset.id);
+    if (note) { state.boardMoving = { note, from: mvBtn.dataset.from }; renderBoard(); }
+    return;
+  }
   if (b === 'edit') { state.boardPicking = true; state.pickTags = [...(state.settings.board_tags || [])]; renderBoard(); }
   else if (b === 'cancel') { state.boardPicking = false; renderBoard(); }
   else if (b === 'save') {
@@ -1698,6 +1726,73 @@ $('#view-board').addEventListener('click', async (e) => {
     state.settings = data; state.boardPicking = false; loadBoard();
   }
 });
+// Move a board card from one tag column to another. If the old tag is
+// written in the text (#grocery), swap it there so it stays changed after
+// future edits; otherwise swap it in the tag list.
+async function moveCardToColumn(note, from, to) {
+  if (to === '__archive') { await archiveNote(note, true); loadBoard(); return; }
+  if (!from || from === to) { renderBoard(); return; }
+  const before = { body: note.body, tags: [...note.tags] };
+  const esc_ = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(^|[^&\\w])#${esc_(from)}(?![\\w-])`, 'gi');
+  let patch;
+  if (re.test(note.body)) {
+    const hasTo = new RegExp(`(^|[^&\\w])#${esc_(to)}(?![\\w-])`, 'i').test(note.body);
+    let first = true;
+    const body = note.body.replace(re, (m, pre) => { if (first && !hasTo) { first = false; return `${pre}#${to}`; } return pre; })
+      .replace(/[ \t]{2,}/g, ' ').replace(/[ \t]+$/gm, '').trim();
+    patch = { body };
+  } else {
+    patch = { tags: [...new Set(note.tags.filter((t) => t !== from).concat(to))] };
+  }
+  // Optimistic: move the card between columns right away
+  state.boardNotes[from] = (state.boardNotes[from] || []).filter((n) => n.id !== note.id);
+  if (!(state.boardNotes[to] || []).some((n) => n.id === note.id)) (state.boardNotes[to] ||= []).unshift({ ...note, ...patch, tags: [...new Set([...(patch.tags || note.tags.filter((t) => t !== from)), to])] });
+  renderBoard();
+  let { data, error } = await sb.from('notes').update(patch).eq('id', note.id).select().single();
+  // A manual copy of the old tag can survive a text swap; drop it too.
+  if (!error && data.tags.includes(from) && patch.body) {
+    ({ data, error } = await sb.from('notes').update({ tags: data.tags.filter((t) => t !== from).concat(data.tags.includes(to) ? [] : [to]) }).eq('id', note.id).select().single());
+  }
+  if (error) { toast('Couldn\'t move: ' + error.message); loadBoard(); return; }
+  replaceNote(data); scheduleTagRefresh(); loadBoard();
+  if (data.tags.includes(from)) {
+    toast(`Still under #${from}: the note starts with the word "${from}", which files it there automatically`);
+  } else {
+    toast(`Moved to #${to}`, 'Undo', async () => {
+      await sb.from('notes').update({ body: before.body }).eq('id', note.id);
+      await sb.from('notes').update({ tags: before.tags }).eq('id', note.id);
+      scheduleTagRefresh(); loadBoard(); loadNotes(true);
+    });
+  }
+}
+
+document.addEventListener('dragstart', (e) => {
+  const card = e.target.closest?.('#view-board article.note[draggable="true"]');
+  if (!card) return;
+  e.dataTransfer.setData('text/x-brainfeed-note', JSON.stringify({ id: card.dataset.id, from: card.closest('[data-col]')?.dataset.col }));
+  e.dataTransfer.effectAllowed = 'move';
+  card.classList.add('dragging');
+});
+document.addEventListener('dragend', (e) => { e.target.closest?.('article.note')?.classList.remove('dragging'); document.querySelectorAll('#view-board .drop').forEach((x) => x.classList.remove('drop')); });
+document.addEventListener('dragover', (e) => {
+  const col = e.target.closest?.('#view-board [data-col]');
+  if (!col || !e.dataTransfer.types.includes('text/x-brainfeed-note')) return;
+  e.preventDefault();
+  document.querySelectorAll('#view-board .drop').forEach((x) => x !== col && x.classList.remove('drop'));
+  col.classList.add('drop');
+});
+document.addEventListener('drop', (e) => {
+  const col = e.target.closest?.('#view-board [data-col]');
+  const raw = e.dataTransfer?.getData('text/x-brainfeed-note');
+  if (!col || !raw) return;
+  e.preventDefault();
+  col.classList.remove('drop');
+  const { id, from } = JSON.parse(raw);
+  const note = findNote(id);
+  if (note) moveCardToColumn(note, from, col.dataset.col);
+});
+
 $('#view-board').addEventListener('keydown', async (e) => {
   const t = e.target.dataset?.quickadd;
   if (!t || e.key !== 'Enter' || e.isComposing) return;
