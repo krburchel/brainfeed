@@ -279,6 +279,20 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
 .rem-edit .field { padding: 7px 10px; font-size: 14px; }
 .rem-edit .row .field { width: auto; flex: 1; min-width: 150px; }
 
+/* ---------- Date picker (specific-dates reminders) ---------- */
+.dp { width: 100%; max-width: 330px; }
+.dp-head { display: flex; align-items: center; gap: 6px; margin: 4px 0; font-weight: 600; font-size: 14px; }
+.dp-head span { flex: 1; text-align: center; }
+.dp-head button { border: 1px solid var(--border); background: var(--surface); border-radius: 8px; width: 28px; height: 28px; }
+.dp-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+.dp-grid .dow { font-size: 10px; color: var(--muted); text-align: center; font-weight: 700; }
+.dp-grid button { border: 1px solid transparent; background: var(--surface-2); border-radius: 8px; height: 32px; font-size: 13px; }
+.dp-grid button.on { background: var(--accent); color: var(--accent-text); font-weight: 700; }
+.dp-grid button.past { opacity: .4; }
+.dp-grid button.blank { visibility: hidden; }
+.dp-foot { display: flex; gap: 8px; align-items: center; margin-top: 6px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+.dp-foot input { width: auto; padding: 5px 8px; }
+
 /* ---------- Calendar ---------- */
 .cal-wrap { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 22px; align-items: start; }
 @media (max-width: 820px) { .cal-wrap { grid-template-columns: minmax(0, 1fr); gap: 14px; } }
@@ -308,6 +322,31 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
 .cal-agenda h3 .spacer { flex: 1; }
 .cal-agenda h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 2px 8px; }
 .cal-agenda .note { font-size: 14px; }
+.cal-modes { display: inline-flex; border: 1px solid var(--border); border-radius: 999px; padding: 2px; }
+.cal-modes button { border: 0; background: transparent; border-radius: 999px; padding: 3px 10px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.cal-modes button.on { background: var(--accent-soft); color: var(--accent); }
+.week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.week-day { border: 1px solid var(--border); background: var(--surface); border-radius: 12px; padding: 8px; min-height: 220px; display: flex; flex-direction: column; gap: 5px; cursor: pointer; }
+.week-day.today { border-color: var(--accent); }
+.week-day.selected { box-shadow: 0 0 0 2px var(--accent-soft); border-color: var(--accent); }
+.week-day h5 { margin: 0 0 2px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.week-day h5 b { display: block; font-size: 18px; color: var(--text); letter-spacing: 0; }
+.wk-item { font-size: 12px; border-radius: 8px; padding: 4px 6px; background: var(--accent-soft); color: var(--text); overflow-wrap: anywhere; }
+.wk-item.over { background: color-mix(in srgb, var(--danger) 16%, transparent); }
+.wk-item.done, .wk-item.proj { background: var(--surface-2); color: var(--muted); }
+.wk-item .t { font-weight: 700; color: var(--accent); margin-right: 4px; }
+.wk-notes { font-size: 11px; color: var(--muted); margin-top: auto; }
+@media (max-width: 820px) {
+  .week { grid-template-columns: minmax(0, 1fr); }
+  .week-day { min-height: 0; flex-direction: row; flex-wrap: wrap; align-items: center; }
+  .week-day h5 { width: 64px; margin: 0; } .week-day h5 b { display: inline; font-size: 15px; margin-left: 4px; }
+  .wk-notes { margin-top: 0; }
+}
+.move-banner { background: var(--accent); color: var(--accent-text); border-radius: 12px; padding: 8px 12px; margin-bottom: 10px; display: flex; gap: 10px; align-items: center; font-size: 14px; font-weight: 600; }
+.move-banner span { flex: 1; }
+.move-banner button { border: 0; background: rgba(255,255,255,.2); color: inherit; border-radius: 8px; padding: 4px 10px; font-weight: 700; }
+.cal-day.drop, .week-day.drop { border-color: var(--accent); background: var(--accent-soft); }
+.rem[draggable="true"] { cursor: grab; }
 
 .notice { background: var(--accent-soft); color: var(--text); border-radius: 12px; padding: 10px 14px; font-size: 13px; margin-bottom: 14px; }
 
@@ -416,7 +455,9 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
             <option value="weekly">Every week</option>
             <option value="monthly">Every month</option>
             <option value="yearly">Every year</option>
+            <option value="dates">Specific dates…</option>
           </select>
+          <div id="compose-dates" class="hidden" style="width:100%"></div>
           <button class="chip" data-quick="1h">In 1 hour</button>
           <button class="chip" data-quick="tonight">Tonight 8pm</button>
           <button class="chip" data-quick="tomorrow">Tomorrow 9am</button>
@@ -477,7 +518,7 @@ const state = {
   notes: [], hasMore: false, loading: false,
   tag: null, pinned: false, archived: false, todo: false, archivedCount: 0, query: '',
   appending: null, expanded: new Set(), children: {}, childCounts: {}, parentTitles: {},
-  remEditing: null, cal: { month: null, selected: null, notes: [] },
+  remEditing: null, cal: { month: null, selected: null, notes: [], mode: 'month', moving: null }, dp: {},
   tags: [], settings: null, reminders: [],
   files: [], remindMode: false, editing: null,
   boardNotes: {}, boardPicking: false, pickTags: [],
@@ -910,6 +951,7 @@ const ICON = {
   copy: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V5a2 2 0 0 1 2-2h11"/></svg>',
   edit: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.4 3.6a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>',
   bell: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>',
+  move: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4M10 15h6M14 13l2 2-2 2"/></svg>',
   plus: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>',
   folder: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 10v6M9 13l3 3 3-3"/></svg>',
   folderOut: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 16v-6M9 13l3-3 3 3"/></svg>',
@@ -1223,6 +1265,75 @@ function renderPendingFiles() {
 $('#pending-files').onclick = (e) => { const i = e.target.dataset.rm; if (i != null) { state.files.splice(+i, 1); renderPendingFiles(); } };
 
 $('#remind-btn').onclick = () => setRemindMode(!state.remindMode);
+// ------------------------------------------------------------------
+// Date picker for "Specific dates" reminders (composer and edit form)
+// ------------------------------------------------------------------
+function dpState(id, seed) {
+  if (!state.dp[id]) {
+    const days = new Set(seed?.days || []);
+    const first = seed?.days?.length ? keyToDate([...days].sort()[0]) : new Date();
+    state.dp[id] = { month: new Date(first.getFullYear(), first.getMonth(), 1), days, time: seed?.time || '09:00' };
+  }
+  return state.dp[id];
+}
+
+function datePickerHtml(id) {
+  const st = dpState(id), m = st.month, todayKey = dayKey(new Date());
+  const lead = new Date(m.getFullYear(), m.getMonth(), 1).getDay();
+  const days = new Date(m.getFullYear(), m.getMonth() + 1, 0).getDate();
+  let cells = ['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => `<span class="dow">${d}</span>`).join('');
+  for (let i = 0; i < lead; i++) cells += '<button class="blank" tabindex="-1"></button>';
+  for (let d = 1; d <= days; d++) {
+    const k = dayKey(new Date(m.getFullYear(), m.getMonth(), d));
+    cells += `<button type="button" data-dp-day="${k}" class="${st.days.has(k) ? 'on' : ''}${k < todayKey ? ' past' : ''}">${d}</button>`;
+  }
+  const picked = [...st.days].sort();
+  return `<div class="dp" data-dp="${id}">
+    <div class="dp-head"><button type="button" data-dp-nav="-1" aria-label="Previous month">‹</button><span>${esc(m.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }))}</span><button type="button" data-dp-nav="1" aria-label="Next month">›</button></div>
+    <div class="dp-grid">${cells}</div>
+    <div class="dp-foot">at <input class="field" type="time" data-dp-time value="${esc(st.time)}">
+      <span>${picked.length ? `${picked.length} date${picked.length > 1 ? 's' : ''}: ${picked.map((k) => keyToDate(k).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })).join(', ')}` : 'Tap days to pick them'}</span></div>
+  </div>`;
+}
+
+function datesFromPicker(id) {
+  const st = dpState(id);
+  const [hh, mm] = (st.time || '09:00').split(':').map(Number);
+  const dates = [...st.days].sort().map((k) => { const d = keyToDate(k); d.setHours(hh, mm, 0, 0); return d; });
+  if (!dates.length) return { error: 'Pick at least one date' };
+  const due = dates.find((d) => d > new Date());
+  if (!due) return { error: 'Pick at least one date in the future' };
+  return { dates, due };
+}
+
+function renderDatePicker(id) {
+  const host = id === 'compose' ? $('#compose-dates') : document.querySelector(`[data-dp-host="${id}"]`);
+  if (host) host.innerHTML = datePickerHtml(id);
+}
+
+document.addEventListener('click', (e) => {
+  const dp = e.target.closest('[data-dp]');
+  if (!dp) return;
+  const id = dp.dataset.dp, st = dpState(id);
+  const day = e.target.closest('[data-dp-day]');
+  const nav = e.target.closest('[data-dp-nav]');
+  if (day) { e.preventDefault(); const k = day.dataset.dpDay; st.days.has(k) ? st.days.delete(k) : st.days.add(k); renderDatePicker(id); }
+  else if (nav) { e.preventDefault(); st.month = new Date(st.month.getFullYear(), st.month.getMonth() + +nav.dataset.dpNav, 1); renderDatePicker(id); }
+});
+document.addEventListener('change', (e) => {
+  const t = e.target.closest('[data-dp-time]');
+  if (t) dpState(t.closest('[data-dp]').dataset.dp).time = t.value;
+});
+
+function syncRepeatUi() {
+  const dates = $('#remind-repeat').value === 'dates';
+  $('#remind-at').classList.toggle('hidden', dates);
+  document.querySelectorAll('#remind-row [data-quick]').forEach((b) => b.classList.toggle('hidden', dates));
+  $('#compose-dates').classList.toggle('hidden', !dates);
+  if (dates) renderDatePicker('compose');
+}
+$('#remind-repeat').addEventListener('change', syncRepeatUi);
+
 function setRemindMode(on) {
   state.remindMode = on;
   $('#remind-btn').classList.toggle('on', on);
@@ -1249,6 +1360,16 @@ $('#remind-row').addEventListener('click', (e) => { const k = e.target.dataset.q
 async function submitCompose() {
   const body = compose.value.trim();
   if (!body && !state.files.length) return;
+  if (state.remindMode && $('#remind-repeat').value === 'dates') {
+    const r = datesFromPicker('compose');
+    if (r.error) { toast(r.error); return; }
+    const { error } = await sb.from('reminders').insert({ body: body || 'Reminder', due_at: r.due.toISOString(), repeat: 'dates', dates: r.dates.map((d) => d.toISOString()) });
+    if (error) { toast('Couldn\'t save reminder: ' + error.message); return; }
+    toast(`Reminder set for ${r.dates.length} date${r.dates.length > 1 ? 's' : ''}. Next: ${whenLabel(r.due)}`);
+    compose.value = ''; $('#remind-repeat').value = ''; delete state.dp.compose; syncRepeatUi(); setRemindMode(false); autosize();
+    loadReminders();
+    return;
+  }
   if (state.remindMode) {
     const at = $('#remind-at').value;
     if (!at) { toast('Pick a time for the reminder.'); return; }
@@ -1629,9 +1750,13 @@ function whenLabel(d) {
   if (diffDays > 1 && diffDays < 7) return `${d.toLocaleDateString(undefined, { weekday: 'long' })} ${t}`;
   return `${diffDays < 0 ? day : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() === now.getFullYear() ? undefined : 'numeric' })} ${t}`;
 }
-const REPEAT_LABEL = { daily: 'Every day', weekdays: 'Weekdays', weekly: 'Every week', monthly: 'Every month', yearly: 'Every year' };
+const REPEAT_LABEL = { daily: 'Every day', weekdays: 'Weekdays', weekly: 'Every week', monthly: 'Every month', yearly: 'Every year', dates: 'Specific dates' };
 
-function nextOccurrence(due, repeat) {
+function nextOccurrence(due, repeat, dates) {
+  if (repeat === 'dates') {
+    const after = Math.max(Date.now(), new Date(due).getTime());
+    return (dates || []).map((d) => new Date(d)).sort((a, b) => a - b).find((d) => d.getTime() > after) || null;
+  }
   const d = new Date(due), now = new Date();
   do {
     if (repeat === 'daily') d.setDate(d.getDate() + 1);
@@ -1653,11 +1778,12 @@ function remHtml(r) {
     return `<div class="rem" data-rem="${r.id}"><div class="rem-edit">
       <input class="field" data-rem-field="body" value="${esc(r.body)}">
       <div class="row">
-        <input class="field" type="datetime-local" data-rem-field="at" value="${toLocalInput(due)}">
+        <input class="field${r.repeat === 'dates' ? ' hidden' : ''}" type="datetime-local" data-rem-field="at" value="${toLocalInput(due)}">
         <select class="field" data-rem-field="repeat">
-          <option value="">Once</option>${Object.entries(REPEAT_LABEL).map(([k, v]) => `<option value="${k}"${r.repeat === k ? ' selected' : ''}>${v}</option>`).join('')}
+          <option value="">Once</option>${Object.entries(REPEAT_LABEL).map(([k, v]) => `<option value="${k}"${r.repeat === k ? ' selected' : ''}>${v}${k === 'dates' ? '…' : ''}</option>`).join('')}
         </select>
       </div>
+      <div data-dp-host="${r.id}" class="${r.repeat === 'dates' ? '' : 'hidden'}">${r.repeat === 'dates' || state.dp[r.id] ? datePickerHtml(r.id) : ''}</div>
       <div class="row" style="justify-content:flex-end"><button class="btn ghost small" data-rem-act="edit-cancel">Cancel</button><button class="btn small" data-rem-act="edit-save">Save</button></div>
     </div></div>`;
   }
@@ -1666,12 +1792,13 @@ function remHtml(r) {
     <div class="rem-main">
       <div class="rem-text">${formatBody(r.body)}</div>
       <div class="rem-when"><span class="due">${overdue ? 'Overdue · ' : ''}${esc(whenLabel(due))}</span>
-        ${r.repeat ? `<span class="src">${REPEAT_LABEL[r.repeat]}</span>` : ''}
+        ${r.repeat === 'dates' ? `<span class="src">${r.dates.length} date${r.dates.length > 1 ? 's' : ''}</span>` : r.repeat ? `<span class="src">${REPEAT_LABEL[r.repeat]}</span>` : ''}
         ${r.last_sent_at ? `<span class="src">sent ${esc(whenLabel(r.last_sent_at))}</span>` : ''}
         ${r.source !== 'web' ? `<span class="src">${esc(r.source)}</span>` : ''}
       </div>
     </div>
     ${r.done ? '' : '<button class="tool" data-rem-act="snooze" title="Snooze 1 hour">+1h</button>'}
+    ${r.done || r.repeat === 'dates' ? '' : `<button class="tool" data-rem-act="move" title="Move to another day">${ICON.move}</button>`}
     <button class="tool" data-rem-act="edit" title="Edit">${ICON.edit}</button>
     <button class="tool" data-rem-act="delete" title="Delete">${ICON.trash}</button>
   </div>`;
@@ -1703,16 +1830,35 @@ async function onReminderClick(e) {
   const id = card.dataset.rem;
   const r = state.reminders.find((x) => x.id === id); if (!r) return;
   let patch = null;
-  if (a === 'edit') { state.remEditing = id; renderRemViews(); card.parentElement.querySelector(`[data-rem="${id}"] [data-rem-field="body"]`)?.focus(); return; }
+  if (a === 'move') { startMove(r); return; }
+  if (a === 'edit') {
+    delete state.dp[id];
+    if (r.repeat === 'dates') {
+      const t = new Date(r.due_at);
+      dpState(id, { days: r.dates.map((d) => dayKey(new Date(d))), time: `${pad2(t.getHours())}:${pad2(t.getMinutes())}` });
+    }
+    state.remEditing = id; renderRemViews(); card.parentElement.querySelector(`[data-rem="${id}"] [data-rem-field="body"]`)?.focus(); return; }
   if (a === 'edit-cancel') { state.remEditing = null; renderRemViews(); return; }
   if (a === 'edit-save') {
     const body = card.querySelector('[data-rem-field="body"]').value.trim();
-    const at = card.querySelector('[data-rem-field="at"]').value;
-    if (!body || !at) { toast('Text and time are required'); return; }
-    patch = { body, due_at: new Date(at).toISOString(), repeat: card.querySelector('[data-rem-field="repeat"]').value || null };
-    state.remEditing = null;
+    const repeat = card.querySelector('[data-rem-field="repeat"]').value || null;
+    if (!body) { toast('Text is required'); return; }
+    if (repeat === 'dates') {
+      const d = datesFromPicker(id);
+      if (d.error) { toast(d.error); return; }
+      patch = { body, repeat, dates: d.dates.map((x) => x.toISOString()), due_at: d.due.toISOString(), done: false };
+    } else {
+      const at = card.querySelector('[data-rem-field="at"]').value;
+      if (!at) { toast('Pick a time'); return; }
+      patch = { body, repeat, dates: null, due_at: new Date(at).toISOString() };
+    }
+    state.remEditing = null; delete state.dp[id];
   } else if (a === 'toggle') {
-    if (!r.done && r.repeat) { patch = { due_at: nextOccurrence(r.due_at, r.repeat).toISOString() }; toast('Next: ' + whenLabel(patch.due_at)); }
+    if (!r.done && r.repeat) {
+      const next = nextOccurrence(r.due_at, r.repeat, r.dates);
+      if (next) { patch = { due_at: next.toISOString() }; toast('Next: ' + whenLabel(next)); }
+      else { patch = { done: true }; toast('Last date done ✓'); }
+    }
     else patch = { done: !r.done };
   } else if (a === 'snooze') {
     patch = { due_at: new Date(Math.max(Date.now(), new Date(r.due_at)) + 3600e3).toISOString() };
@@ -1728,6 +1874,18 @@ async function onReminderClick(e) {
   loadReminders();
 }
 $('#view-reminders').addEventListener('click', onReminderClick);
+document.addEventListener('change', (e) => {
+  const sel = e.target.closest('.rem-edit [data-rem-field="repeat"]');
+  if (!sel) return;
+  const card = sel.closest('[data-rem]'), id = card.dataset.rem, dates = sel.value === 'dates';
+  card.querySelector('[data-rem-field="at"]').classList.toggle('hidden', dates);
+  const host = card.querySelector('[data-dp-host]');
+  host.classList.toggle('hidden', !dates);
+  if (dates) {
+    if (!state.dp[id]) { const at = new Date(card.querySelector('[data-rem-field="at"]').value || Date.now()); dpState(id, { days: [dayKey(at)], time: `${pad2(at.getHours())}:${pad2(at.getMinutes())}` }); }
+    host.innerHTML = datePickerHtml(id);
+  }
+});
 $('#view-reminders').addEventListener('keydown', (e) => {
   if (e.target.closest('.rem-edit') && e.key === 'Escape') { state.remEditing = null; renderRemViews(); }
 });
@@ -1736,11 +1894,67 @@ $('#view-reminders').addEventListener('keydown', (e) => {
 // Calendar: month grid of reminders (incl. future repeats) and notes
 // ------------------------------------------------------------------
 let calTimer = null;
+
+// Move a reminder to another day, keeping its time of day. For repeating
+// reminders this shifts the whole series to start from the new day.
+async function moveReminderToDay(r, key) {
+  state.cal.moving = null;
+  const old = new Date(r.due_at), d = keyToDate(key);
+  d.setHours(old.getHours(), old.getMinutes(), 0, 0);
+  if (dayKey(old) === key) { renderCalendar(); return; }
+  const prev = r.due_at;
+  r.due_at = d.toISOString(); state.cal.selected = key; renderRemViews();
+  const { error } = await sb.from('reminders').update({ due_at: r.due_at }).eq('id', r.id);
+  if (error) { r.due_at = prev; renderRemViews(); toast('Couldn\'t move: ' + error.message); return; }
+  toast(`Moved to ${whenLabel(d)}${d <= new Date() ? ' (that time has passed, so it\'s due now)' : ''}`, 'Undo', async () => {
+    await sb.from('reminders').update({ due_at: prev }).eq('id', r.id); loadReminders();
+  });
+  loadReminders();
+}
+
+function startMove(r) {
+  if (state.view !== 'calendar') {
+    state.cal.selected = dayKey(new Date(r.due_at));
+    const sel = keyToDate(state.cal.selected); state.cal.month = new Date(sel.getFullYear(), sel.getMonth(), 1);
+    state.cal.moving = r; switchView('calendar'); return;
+  }
+  state.cal.moving = r; renderCalendar();
+  $('#view-calendar').scrollIntoView({ behavior: 'smooth' });
+}
+
+// Drag & drop (desktop): drag a reminder from the day list onto a day.
+document.addEventListener('dragstart', (e) => {
+  const card = e.target.closest?.('#view-calendar .rem[draggable="true"]');
+  if (!card) return;
+  e.dataTransfer.setData('text/x-brainfeed-rem', card.dataset.rem);
+  e.dataTransfer.effectAllowed = 'move';
+});
+document.addEventListener('dragover', (e) => {
+  const cell = e.target.closest?.('#view-calendar [data-day]');
+  if (!cell || !e.dataTransfer.types.includes('text/x-brainfeed-rem')) return;
+  e.preventDefault();
+  document.querySelectorAll('#view-calendar .drop').forEach((x) => x !== cell && x.classList.remove('drop'));
+  cell.classList.add('drop');
+});
+document.addEventListener('dragleave', (e) => { e.target.closest?.('#view-calendar [data-day]')?.classList.remove('drop'); });
+document.addEventListener('drop', (e) => {
+  const cell = e.target.closest?.('#view-calendar [data-day]');
+  const id = e.dataTransfer?.getData('text/x-brainfeed-rem');
+  if (!cell || !id) return;
+  e.preventDefault();
+  const r = state.reminders.find((x) => x.id === id);
+  if (r) moveReminderToDay(r, cell.dataset.day);
+});
 const pad2 = (x) => String(x).padStart(2, '0');
 const dayKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 const keyToDate = (k) => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d); };
 
 function calRange() {
+  if (state.cal.mode === 'week') {
+    const start = keyToDate(state.cal.selected); start.setDate(start.getDate() - start.getDay());
+    const end = new Date(start); end.setDate(end.getDate() + 7);
+    return { start, end };
+  }
   const m = state.cal.month;
   const start = new Date(m.getFullYear(), m.getMonth(), 1);
   start.setDate(start.getDate() - start.getDay());           // back to Sunday
@@ -1751,6 +1965,7 @@ function calRange() {
 // Occurrences of a reminder between from and to, in local time, using the
 // same rules as the server (anchored to the original date; month-end clamps).
 function occurrences(r, from, to) {
+  if (r.repeat === 'dates') return (r.dates || []).map((d) => new Date(d)).filter((d) => d >= from && d < to);
   const d0 = new Date(r.due_at);
   if (!r.repeat || r.done) return d0 >= from && d0 < to ? [d0] : [];
   const at = (k) => {
@@ -1799,8 +2014,22 @@ function renderCalendar() {
     }
   }
   for (const n of state.cal.notes) (notes[dayKey(new Date(n.created_at))] ||= []).push(n);
+  // A specific date is finished once the reminder has moved past it (sent or checked off).
+  const isPast = (x) => x.r.repeat === 'dates' && !x.real && (x.r.done || x.at < new Date(x.r.due_at));
 
-  let grid = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => `<div class="cal-dow">${d}</div>`).join('');
+  let grid = '';
+  if (state.cal.mode === 'week') {
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+      const k = dayKey(d), rs = (rems[k] || []).sort((a, b) => a.at - b.at), ns = notes[k] || [];
+      grid += `<div class="week-day${k === todayKey ? ' today' : ''}${k === state.cal.selected ? ' selected' : ''}" data-day="${k}">
+        <h5>${esc(d.toLocaleDateString(undefined, { weekday: 'short' }))}<b>${d.getDate()}</b></h5>
+        ${rs.map((x) => `<div class="wk-item${x.r.done || isPast(x) ? ' done' : !x.real ? ' proj' : x.at <= now ? ' over' : ''}"><span class="t">${esc(timeLabel(x.at))}</span>${esc(x.r.body)}</div>`).join('')}
+        ${ns.length ? `<div class="wk-notes">✎ ${ns.length} note${ns.length > 1 ? 's' : ''}</div>` : ''}
+      </div>`;
+    }
+  } else {
+  grid = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => `<div class="cal-dow">${d}</div>`).join('');
   for (let i = 0; i < 42; i++) {
     const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
     const k = dayKey(d), rs = rems[k] || [], ns = notes[k] || [];
@@ -1811,24 +2040,29 @@ function renderCalendar() {
       + (ns.length ? `<span class="cal-dot n" title="Notes">✎${ns.length}</span>` : '')
       + '</span></button>';
   }
+  }
 
   const sel = state.cal.selected, selDate = keyToDate(sel);
   const dayRems = (rems[sel] || []).sort((a, b) => a.at - b.at);
   const dayNotes = notes[sel] || [];
-  const remRows = dayRems.map(({ r, at, real }) => real ? remHtml(r)
+  const remRows = dayRems.map((x) => ({ ...x, past: isPast(x) })).map(({ r, at, real, past }) => real ? remHtml(r).replace('<div class="rem', `<div draggable="${!r.done && r.repeat !== 'dates'}" class="rem`)
     : `<div class="rem projected"><div class="rem-main"><div class="rem-text">${formatBody(r.body)}</div>
-        <div class="rem-when"><span>${esc(timeLabel(at))}</span><span class="src">↻ ${REPEAT_LABEL[r.repeat]}</span></div></div></div>`).join('');
+        <div class="rem-when"><span>${esc(timeLabel(at))}</span><span class="src">${r.repeat === 'dates' ? (past ? '✓ done' : 'scheduled date') : '↻ ' + REPEAT_LABEL[r.repeat]}</span></div></div></div>`).join('');
   const label = selDate.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: selDate.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
 
   $('#view-calendar').innerHTML = `<div class="cal-wrap">
     <div>
+      ${state.cal.moving ? `<div class="move-banner"><span>Tap a day to move "${esc(state.cal.moving.body.slice(0, 40))}"</span><button data-cal="move-cancel">Cancel</button></div>` : ''}
       <div class="cal-head">
-        <button class="icon-btn" data-cal="prev" aria-label="Previous month">‹</button>
-        <h2>${esc(state.cal.month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }))}</h2>
+        <button class="icon-btn" data-cal="prev" aria-label="Previous">‹</button>
+        <h2>${esc(state.cal.mode === 'week'
+          ? `${start.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${new Date(end - 864e5).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
+          : state.cal.month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }))}</h2>
+        <span class="cal-modes"><button data-cal="mode-month" class="${state.cal.mode === 'month' ? 'on' : ''}">Month</button><button data-cal="mode-week" class="${state.cal.mode === 'week' ? 'on' : ''}">Week</button></span>
         <button class="btn ghost small" data-cal="today">Today</button>
-        <button class="icon-btn" data-cal="next" aria-label="Next month">›</button>
+        <button class="icon-btn" data-cal="next" aria-label="Next">›</button>
       </div>
-      <div class="cal-grid">${grid}</div>
+      <div class="${state.cal.mode === 'week' ? 'week' : 'cal-grid'}">${grid}</div>
     </div>
     <div class="cal-agenda">
       <h3>${esc(label)}<span class="spacer"></span><button class="btn small" data-cal="add">+ Reminder</button></h3>
@@ -1843,6 +2077,7 @@ function renderCalendar() {
 
 $('#view-calendar').addEventListener('click', (e) => {
   const day = e.target.closest('[data-day]');
+  if (day && state.cal.moving) { moveReminderToDay(state.cal.moving, day.dataset.day); return; }
   if (day) {
     state.cal.selected = day.dataset.day;
     const d = keyToDate(day.dataset.day);
@@ -1850,6 +2085,17 @@ $('#view-calendar').addEventListener('click', (e) => {
     renderCalendar(); return;
   }
   const c = e.target.closest('[data-cal]')?.dataset.cal;
+  if (c === 'move-cancel') { state.cal.moving = null; renderCalendar(); return; }
+  if (c === 'mode-month' || c === 'mode-week') {
+    state.cal.mode = c === 'mode-week' ? 'week' : 'month';
+    const sel = keyToDate(state.cal.selected); state.cal.month = new Date(sel.getFullYear(), sel.getMonth(), 1);
+    renderCalendar(); loadCalendarNotes(); return;
+  }
+  if ((c === 'prev' || c === 'next') && state.cal.mode === 'week') {
+    const d = keyToDate(state.cal.selected); d.setDate(d.getDate() + (c === 'next' ? 7 : -7));
+    state.cal.selected = dayKey(d); state.cal.month = new Date(d.getFullYear(), d.getMonth(), 1);
+    renderCalendar(); loadCalendarNotes(); return;
+  }
   if (c === 'prev' || c === 'next') {
     const m = state.cal.month;
     state.cal.month = new Date(m.getFullYear(), m.getMonth() + (c === 'next' ? 1 : -1), 1);
