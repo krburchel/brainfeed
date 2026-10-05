@@ -60,6 +60,14 @@ button { cursor: pointer; }
 a { color: var(--accent); }
 .hidden { display: none !important; }
 
+/* ---------- Tag suggestions ---------- */
+.tag-ac { position: fixed; z-index: 45; min-width: 180px; max-width: min(300px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 4px; }
+.tag-ac button { display: flex; width: 100%; align-items: center; gap: 8px; border: 0; background: none; color: var(--text); font: inherit; font-size: 14px; text-align: left; padding: 7px 10px; border-radius: 7px; cursor: pointer; }
+.tag-ac button.on { background: var(--accent-soft); }
+.tag-ac .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-ac button b { color: var(--accent); font-weight: 600; }
+.tag-ac .n { margin-left: auto; color: var(--muted); font-size: 12px; }
+
 /* ---------- Seasonal themes ---------- */
 header::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 3px; background: var(--season-stripe, none); pointer-events: none; }
 #season-emoji { font-size: 15px; margin-left: 2px; }
@@ -1300,6 +1308,96 @@ function renderTags() {
   $('#tag-list').innerHTML = html;
   if (state.view === 'board' && state.boardPicking) renderBoard();
 }
+
+// ------------------------------------------------------------------
+// Tag suggestions: typing "#" in a note field lists matching tags,
+// most-used first. Arrows move, Enter/Tab picks, Esc closes.
+// ------------------------------------------------------------------
+const TagAC = (() => {
+  const FIELDS = '#compose, #edit-text, [data-append], [data-add-after], [data-add-inside], #search';
+  let box = null, field = null, items = [], sel = 0, moved = false, start = 0;
+
+  function tokenAt(el) {
+    const pos = el.selectionStart, end = el.selectionEnd;
+    if (pos == null || pos !== end) return null;
+    const m = el.value.slice(0, pos).match(/(^|[^&\w])#([A-Za-z][\w-]*)?$/);
+    if (!m) return null;
+    const after = el.value.slice(pos);
+    if (/^[\w-]/.test(after)) return null; // caret is in the middle of a word
+    return { start: pos - (m[2] || '').length - 1, partial: (m[2] || '').toLowerCase() };
+  }
+  function matches(partial) {
+    const score = (t) => t.tag.startsWith(partial) ? 0 : t.tag.includes(partial) ? 1 : 2;
+    return (state.tags || []).filter((t) => score(t) < 2)
+      .sort((a, b) => score(a) - score(b) || Number(b.count) - Number(a.count) || a.tag.localeCompare(b.tag))
+      .slice(0, 6);
+  }
+  // Where the caret sits on screen, measured with a hidden copy of the field.
+  function caretRect(el, idx) {
+    const r = el.getBoundingClientRect();
+    if (el.tagName !== 'TEXTAREA') return { left: r.left + 8, top: r.bottom };
+    const cs = getComputedStyle(el), m = document.createElement('div');
+    for (const k of ['boxSizing', 'width', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth', 'fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'tabSize']) m.style[k] = cs[k];
+    Object.assign(m.style, { position: 'fixed', visibility: 'hidden', whiteSpace: 'pre-wrap', overflowWrap: 'break-word', left: r.left + 'px', top: r.top + 'px' });
+    m.textContent = el.value.slice(0, idx);
+    const mark = document.createElement('span'); mark.textContent = '#'; m.appendChild(mark);
+    document.body.appendChild(m);
+    const mr = mark.getBoundingClientRect(); m.remove();
+    return { left: mr.left, top: Math.min(mr.bottom - el.scrollTop, r.bottom) + 4 };
+  }
+  function close() { box?.remove(); box = null; field = null; items = []; }
+  function draw() {
+    if (!box) { box = document.createElement('div'); box.className = 'tag-ac'; box.setAttribute('role', 'listbox'); document.body.appendChild(box);
+      box.addEventListener('pointerdown', (e) => { e.preventDefault(); const b = e.target.closest('button'); if (b) pick(Number(b.dataset.i)); }); }
+    const tok = tokenAt(field);
+    box.innerHTML = items.map((t, i) => {
+      const k = t.tag.indexOf(tok.partial);
+      const label = tok.partial && k >= 0 ? esc(t.tag.slice(0, k)) + '<b>' + esc(t.tag.slice(k, k + tok.partial.length)) + '</b>' + esc(t.tag.slice(k + tok.partial.length)) : esc(t.tag);
+      return `<button type="button" role="option" data-i="${i}" class="${i === sel ? 'on' : ''}"><span class="t">#${label}</span><span class="n">${t.count}</span></button>`;
+    }).join('');
+    const c = caretRect(field, start);
+    const w = box.offsetWidth, h = box.offsetHeight;
+    const left = Math.max(8, Math.min(c.left, innerWidth - w - 8));
+    const top = c.top + h > innerHeight - 8 ? Math.max(8, c.top - h - 28) : c.top;
+    box.style.left = left + 'px'; box.style.top = top + 'px';
+  }
+  function update(el) {
+    const tok = el && el.matches?.(FIELDS) ? tokenAt(el) : null;
+    if (!tok) return close();
+    const found = matches(tok.partial);
+    if (!found.length) return close();
+    if (field !== el || start !== tok.start) { sel = 0; moved = false; }
+    field = el; start = tok.start; items = found; sel = Math.min(sel, items.length - 1);
+    draw();
+  }
+  function pick(i) {
+    const t = items[i]; if (!t || !field) return;
+    const el = field, pos = el.selectionStart, v = el.value;
+    const space = /^\s/.test(v.slice(pos)) ? '' : ' ';
+    el.value = v.slice(0, start) + '#' + t.tag + space + v.slice(pos);
+    const caret = start + 1 + t.tag.length + space.length;
+    el.setSelectionRange(caret, caret);
+    close();
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  document.addEventListener('input', (e) => { if (!e.isComposing) update(e.target); }, true);
+  document.addEventListener('click', (e) => { if (!box?.contains(e.target)) update(e.target); }, true);
+  document.addEventListener('focusout', (e) => { if (e.target === field) close(); }, true);
+  addEventListener('resize', close);
+  document.addEventListener('scroll', (e) => { if (box && e.target !== field) close(); }, true);
+  // Capture phase so these keys don't also save the note.
+  document.addEventListener('keydown', (e) => {
+    if (!box || e.target !== field || e.isComposing) return;
+    const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+    if (e.key === 'ArrowDown') { stop(); sel = (sel + 1) % items.length; moved = true; draw(); }
+    else if (e.key === 'ArrowUp') { stop(); sel = (sel - 1 + items.length) % items.length; moved = true; draw(); }
+    else if (e.key === 'Escape') { stop(); close(); }
+    // With only "#" typed, Enter keeps its normal job unless a tag was arrowed to.
+    else if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && (tokenAt(field)?.partial || moved))) { stop(); pick(sel); }
+    else if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) setTimeout(() => update(field), 0);
+  }, true);
+  return { close };
+})();
 
 // ------------------------------------------------------------------
 // Composer
