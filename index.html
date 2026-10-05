@@ -60,6 +60,14 @@ button { cursor: pointer; }
 a { color: var(--accent); }
 .hidden { display: none !important; }
 
+/* ---------- Seasonal themes ---------- */
+header::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 3px; background: var(--season-stripe, none); pointer-events: none; }
+#season-emoji { font-size: 15px; margin-left: 2px; }
+#season-fx { position: fixed; inset: 0; pointer-events: none; z-index: 15; overflow: hidden; }
+#season-fx span { position: absolute; top: -32px; animation: bf-fall linear infinite; will-change: transform; }
+@keyframes bf-fall { to { transform: translate(40px, 110vh) rotate(300deg); } }
+@media (prefers-reduced-motion: reduce) { #season-fx { display: none; } }
+
 /* ---------- Auth ---------- */
 #auth {
   min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px 16px;
@@ -421,7 +429,7 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
 <div id="app" class="hidden">
   <header>
     <div class="header-row">
-      <div class="brand"><img src="favicon-32.png" alt=""><span>BrainFeed</span></div>
+      <div class="brand"><img src="favicon-32.png" alt=""><span>BrainFeed</span><span id="season-emoji" aria-hidden="true"></span></div>
       <label class="search">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <input class="field" id="search" type="search" placeholder="Search notes or #tag" autocomplete="off">
@@ -518,7 +526,7 @@ const SUPABASE_URL = 'https://bzvibdjrknqvmurwjroq.supabase.co';
 const SUPABASE_KEY = 'sb_publishable__ybJKWB4JLb19YgGdW8LCg_Z4Xu5iSW';
 const PAGE = 50;
 const BUCKET = 'attachments';
-const LS = { queue: 'bf-queue', cache: 'bf-cache', theme: 'bf-theme', alerted: 'bf-alerted' };
+const LS = { queue: 'bf-queue', cache: 'bf-cache', theme: 'bf-theme', alerted: 'bf-alerted', season: 'bf-season', seasonFx: 'bf-season-fx' };
 
 // A password-reset email link lands here with #...type=recovery; note it before
 // the client reads (and clears) the hash.
@@ -560,12 +568,78 @@ function toast(msg, action, onAction, ms = 4000) {
 // ------------------------------------------------------------------
 // Theme
 // ------------------------------------------------------------------
+// ------------------------------------------------------------------
+// Seasonal themes: a palette per month for light and dark (all checked
+// for WCAG AA contrast), a header stripe, an emoji and optional particles.
+// ------------------------------------------------------------------
+const SEASONS = {"jan": {"name": "Winter", "emoji": "⛄", "stripe": "linear-gradient(90deg,#9ec9f0,#e8f2fc,#9ec9f0)", "particles": "❄️", "empty": "Quiet as fresh snow.", "light": {"bg": "#f2f6fb", "surface": "#ffffff", "surface-2": "#e6eef8", "border": "#d3e0ef", "accent": "#2763a6", "accent-soft": "#e0ebf8", "accent-text": "#ffffff"}, "dark": {"bg": "#0e131a", "surface": "#17202b", "surface-2": "#202c3a", "border": "#2c3a4d", "accent": "#86bbf0", "accent-soft": "#1c3149", "accent-text": "#0a1622"}}, "feb": {"name": "Valentine's", "emoji": "💘", "stripe": "linear-gradient(90deg,#e91e63,#f8bbd0,#e91e63)", "particles": "", "empty": "Nothing here yet. Write something you love.", "light": {"bg": "#fbf4f6", "surface": "#ffffff", "surface-2": "#f6e5eb", "border": "#efd2dc", "accent": "#b8154f", "accent-soft": "#fbe0e9", "accent-text": "#ffffff"}, "dark": {"bg": "#170f13", "surface": "#22161c", "surface-2": "#2e1d25", "border": "#45293a", "accent": "#f592b6", "accent-soft": "#3e1f2d", "accent-text": "#2a0b18"}}, "mar": {"name": "St. Patrick's", "emoji": "🍀", "stripe": "linear-gradient(90deg,#1e7d3a,#f2c94c,#1e7d3a)", "particles": "", "empty": "Your feed is empty. Feeling lucky?", "light": {"bg": "#f3f8f3", "surface": "#ffffff", "surface-2": "#e2efe4", "border": "#cde2d0", "accent": "#1b7034", "accent-soft": "#ddeee1", "accent-text": "#ffffff"}, "dark": {"bg": "#0e1510", "surface": "#16201a", "surface-2": "#1f2c23", "border": "#2c3e31", "accent": "#72d290", "accent-soft": "#1a3524", "accent-text": "#0a1a0f"}}, "apr": {"name": "Spring", "emoji": "🌷", "stripe": "linear-gradient(90deg,#c3a6f0,#a8e6cf,#f7c8e0)", "particles": "", "empty": "Fresh start. Plant an idea.", "light": {"bg": "#f7f5fb", "surface": "#ffffff", "surface-2": "#eee7f8", "border": "#ddd2ef", "accent": "#6f45ba", "accent-soft": "#ece3fa", "accent-text": "#ffffff"}, "dark": {"bg": "#131119", "surface": "#1d1a26", "surface-2": "#282336", "border": "#3a3350", "accent": "#c6abf6", "accent-soft": "#30264a", "accent-text": "#160f26"}}, "may": {"name": "Bloom", "emoji": "🌸", "stripe": "linear-gradient(90deg,#f28b6b,#7cc576,#f28b6b)", "particles": "", "empty": "Nothing blooming yet. Add a thought.", "light": {"bg": "#fbf6f3", "surface": "#ffffff", "surface-2": "#f6e8e1", "border": "#ecd5c9", "accent": "#b2462f", "accent-soft": "#fbe4dd", "accent-text": "#ffffff"}, "dark": {"bg": "#17110f", "surface": "#221a17", "surface-2": "#2e231f", "border": "#46342c", "accent": "#f4a089", "accent-soft": "#3d2620", "accent-text": "#2a110a"}}, "jun": {"name": "Summer", "emoji": "☀️", "stripe": "linear-gradient(90deg,#ffd166,#6ec3f4,#ffd166)", "particles": "", "empty": "Clear skies. Nothing here yet.", "light": {"bg": "#fbfaf0", "surface": "#ffffff", "surface-2": "#f3efd8", "border": "#e6dfbb", "accent": "#1c6ea6", "accent-soft": "#dfeef9", "accent-text": "#ffffff"}, "dark": {"bg": "#12130f", "surface": "#1b1d17", "surface-2": "#262920", "border": "#3a3d2d", "accent": "#ffd166", "accent-soft": "#3a3317", "accent-text": "#1d1600"}}, "jul": {"name": "Fourth of July", "emoji": "🎆", "stripe": "linear-gradient(90deg,#b22234 0 33%,#ffffff 33% 66%,#3c3b6e 66%)", "particles": "", "empty": "Nothing here yet. Light it up!", "light": {"bg": "#f5f7fb", "surface": "#ffffff", "surface-2": "#e8ecf6", "border": "#d5dcec", "accent": "#b22234", "accent-soft": "#fae1e5", "accent-text": "#ffffff"}, "dark": {"bg": "#0e1220", "surface": "#161c2e", "surface-2": "#1f2740", "border": "#2e3a5a", "accent": "#ff7a88", "accent-soft": "#3a1e2a", "accent-text": "#2a0a10"}}, "aug": {"name": "Beach", "emoji": "🏖️", "stripe": "linear-gradient(90deg,#1aa3a8,#f1dcae,#1aa3a8)", "particles": "", "empty": "Nothing but sand here. Add a note.", "light": {"bg": "#faf7f0", "surface": "#ffffff", "surface-2": "#e2f1ef", "border": "#d6e6e2", "accent": "#0d7275", "accent-soft": "#d8efed", "accent-text": "#ffffff"}, "dark": {"bg": "#0e1616", "surface": "#162121", "surface-2": "#1f2d2d", "border": "#2e4343", "accent": "#62d6d2", "accent-soft": "#173535", "accent-text": "#062020"}}, "sep": {"name": "Football season", "emoji": "🏈", "stripe": "repeating-linear-gradient(90deg,#2e7d32 0 22px,#ffffff 22px 24px)", "particles": "", "empty": "Empty field. Kick something off.", "light": {"bg": "#f3f6f0", "surface": "#ffffff", "surface-2": "#e5ebdf", "border": "#d1dbc7", "accent": "#6b3f22", "accent-soft": "#f0e3d6", "accent-text": "#ffffff"}, "dark": {"bg": "#0f140e", "surface": "#182016", "surface-2": "#222c1f", "border": "#34432f", "accent": "#d29a6c", "accent-soft": "#3a2a1d", "accent-text": "#1d1208"}}, "oct": {"name": "Halloween", "emoji": "🎃", "stripe": "repeating-linear-gradient(90deg,#ff8a1f 0 18px,#111 18px 36px)", "particles": "🦇", "preferDark": true, "empty": "Nothing here… spooky 👻", "light": {"bg": "#fdf6ee", "surface": "#ffffff", "surface-2": "#f8e8d6", "border": "#efd5b9", "accent": "#9e4600", "accent-soft": "#fde8d3", "accent-text": "#ffffff"}, "dark": {"bg": "#0d0b0a", "surface": "#1a1612", "surface-2": "#26201a", "border": "#3b3025", "accent": "#ff8a1f", "accent-soft": "#3d250e", "accent-text": "#1a0d00"}}, "nov": {"name": "Harvest", "emoji": "🦃", "stripe": "linear-gradient(90deg,#a0522d,#e8a35a,#7a5c2e)", "particles": "🍂", "empty": "Nothing to harvest yet. Add a note.", "light": {"bg": "#faf5ef", "surface": "#ffffff", "surface-2": "#f2e5d6", "border": "#e5d0b8", "accent": "#984a26", "accent-soft": "#f7e2d2", "accent-text": "#ffffff"}, "dark": {"bg": "#15100c", "surface": "#201913", "surface-2": "#2c2219", "border": "#43331f", "accent": "#eaa860", "accent-soft": "#3b2915", "accent-text": "#1f1203"}}, "dec": {"name": "Holidays", "emoji": "🎄", "stripe": "repeating-linear-gradient(90deg,#b3202a 0 14px,#ffffff 14px 18px,#1b6b3a 18px 32px,#ffffff 32px 36px)", "particles": "❄️", "empty": "All quiet. Add a note to the list.", "light": {"bg": "#f5f8f5", "surface": "#ffffff", "surface-2": "#e5eee6", "border": "#d2e1d4", "accent": "#1a6638", "accent-soft": "#dfeee2", "accent-text": "#ffffff"}, "dark": {"bg": "#0d1310", "surface": "#151e19", "surface-2": "#1e2a23", "border": "#2d3e34", "accent": "#ee6a6f", "accent-soft": "#3b1c1f", "accent-text": "#22070a"}}};
+const MONTH_KEYS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const SEASON_VARS = ['bg', 'surface', 'surface-2', 'border', 'accent', 'accent-soft', 'accent-text'];
+
+function currentSeason() {
+  const pick = lsGet(LS.season, 'auto');
+  if (pick === 'off') return null;
+  const key = pick === 'auto' ? MONTH_KEYS[new Date().getMonth()] : pick;
+  return SEASONS[key] ? { key, ...SEASONS[key] } : null;
+}
+function isDarkMode() {
+  const t = document.documentElement.getAttribute('data-theme');
+  return t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+function applySeason() {
+  const se = currentSeason(), root = document.documentElement;
+  for (const v of SEASON_VARS) root.style.removeProperty('--' + v);
+  root.style.removeProperty('--season-stripe');
+  root.dataset.season = se ? se.key : 'off';
+  if (se) {
+    const pal = se[isDarkMode() ? 'dark' : 'light'];
+    for (const v of SEASON_VARS) root.style.setProperty('--' + v, pal[v]);
+    root.style.setProperty('--season-stripe', se.stripe);
+  }
+  const em = $('#season-emoji'); if (em) { em.textContent = se ? se.emoji : ''; em.title = se ? se.name : ''; }
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = getComputedStyle(root).getPropertyValue('--accent').trim() || '#6042e8';
+  renderSeasonFx(se);
+}
+
+function renderSeasonFx(se) {
+  let layer = document.getElementById('season-fx');
+  const on = se && se.particles && lsGet(LS.seasonFx, true) && !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!on) { layer?.remove(); return; }
+  if (layer && layer.dataset.k === se.key) return;
+  layer?.remove();
+  layer = document.createElement('div');
+  layer.id = 'season-fx'; layer.dataset.k = se.key; layer.setAttribute('aria-hidden', 'true');
+  const count = se.key === 'oct' ? 5 : 14;
+  for (let i = 0; i < count; i++) {
+    const p = document.createElement('span');
+    p.textContent = se.particles;
+    p.style.left = (Math.random() * 100) + '%';
+    p.style.fontSize = (10 + Math.random() * 12) + 'px';
+    p.style.opacity = (0.22 + Math.random() * 0.3).toFixed(2);
+    p.style.animationDuration = (se.key === 'oct' ? 16 : 10) + Math.random() * 10 + 's';
+    p.style.animationDelay = (-Math.random() * 20) + 's';
+    layer.appendChild(p);
+  }
+  document.body.appendChild(layer);
+}
+
 function applyTheme() {
   const t = lsGet(LS.theme, 'auto');
-  if (t === 'auto') document.documentElement.removeAttribute('data-theme');
-  else document.documentElement.setAttribute('data-theme', t);
+  // Some seasons (Halloween) look best dark: "Auto" follows the season's lead.
+  const effective = t === 'auto' && currentSeason()?.preferDark ? 'dark' : t;
+  if (effective === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', effective);
   const l = $('#theme-label'); if (l) l.textContent = t[0].toUpperCase() + t.slice(1);
+  applySeason();
 }
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', applySeason);
+// Roll over to the next month's theme without a reload.
+let seasonMonth = new Date().getMonth();
+const checkSeasonRollover = () => { if (new Date().getMonth() !== seasonMonth) { seasonMonth = new Date().getMonth(); applyTheme(); } };
+setInterval(checkSeasonRollover, 3600e3);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkSeasonRollover(); });
 applyTheme();
 
 // ------------------------------------------------------------------
@@ -1183,7 +1257,7 @@ function renderFeed() {
     const filtered = state.tag || state.pinned || state.todo || state.query;
     feed.innerHTML = state.loading ? '' : state.archived && !filtered
       ? '<div class="empty"><strong>No archived notes</strong>Use the box icon on a note to archive it. It leaves your feed but stays searchable.</div>'
-      : `<div class="empty"><strong>${filtered ? 'Nothing matches' : 'Your feed is empty'}</strong>${filtered ? 'Try a different search or tag.' : 'Type a thought above and hit Enter. Add #tags to file it.'}</div>`;
+      : `<div class="empty"><strong>${filtered ? 'Nothing matches' : esc(currentSeason()?.empty || 'Your feed is empty')}</strong>${filtered ? 'Try a different search or tag.' : 'Type a thought above and hit Enter. Add #tags to file it.'}</div>`;
   } else {
     let html = '', lastDay = '';
     for (const n of state.notes) {
@@ -2246,6 +2320,16 @@ async function openSettings() {
   back.className = 'modal-back';
   back.innerHTML = `<div class="modal" role="dialog" aria-label="Settings">
     <h2>Settings<span class="spacer"></span><button class="tool" data-set="close" aria-label="Close">✕</button></h2>
+    <h3>Seasonal theme</h3>
+    <p class="help">Colors, a header stripe and a little emoji that change on the 1st of each month. Applies on this device.</p>
+    <div class="row">
+      <select class="field" id="set-season">
+        <option value="auto">Seasonal (changes monthly)</option>
+        <option value="off">Off (classic purple)</option>
+        ${MONTH_KEYS.map((k, i) => `<option value="${k}">Always ${esc(SEASONS[k].name)} ${SEASONS[k].emoji} (${new Date(2026, i, 1).toLocaleDateString(undefined, { month: 'short' })})</option>`).join('')}
+      </select>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:14px"><input type="checkbox" id="set-fx"> Seasonal effects (snow, leaves, bats)</label>
     <h3>Time zone</h3>
     <p class="help">Used for reminder times, recurring reminders and what Hermes means by "9am".</p>
     <div class="row">
@@ -2263,6 +2347,10 @@ async function openSettings() {
     <div id="agent-list" style="margin-top:12px"></div>
   </div>`;
   document.body.appendChild(back);
+  back.querySelector('#set-season').value = lsGet(LS.season, 'auto');
+  back.querySelector('#set-fx').checked = lsGet(LS.seasonFx, true);
+  back.querySelector('#set-season').addEventListener('change', (e) => { lsSet(LS.season, e.target.value); applyTheme(); renderFeed(); });
+  back.querySelector('#set-fx').addEventListener('change', (e) => { lsSet(LS.seasonFx, e.target.checked); applySeason(); });
   const render = () => {
     back.querySelector('#agent-list').innerHTML = state.agents.length ? state.agents.map((t) => `
       <div class="agent${t.revoked_at ? ' revoked' : ''}" data-agent="${t.id}">
