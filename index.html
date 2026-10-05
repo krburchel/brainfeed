@@ -272,6 +272,43 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
 .rem-text { overflow-wrap: anywhere; }
 .rem-when { font-size: 13px; color: var(--muted); margin-top: 2px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .rem.overdue .rem-when .due { color: var(--danger); font-weight: 600; }
+.rem.projected { background: transparent; border-style: dashed; }
+.rem.projected .rem-text { color: var(--muted); }
+.rem-edit { display: grid; gap: 6px; width: 100%; }
+.rem-edit .row { display: flex; gap: 6px; flex-wrap: wrap; }
+.rem-edit .field { padding: 7px 10px; font-size: 14px; }
+.rem-edit .row .field { width: auto; flex: 1; min-width: 150px; }
+
+/* ---------- Calendar ---------- */
+.cal-wrap { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 22px; align-items: start; }
+@media (max-width: 820px) { .cal-wrap { grid-template-columns: minmax(0, 1fr); gap: 14px; } }
+.cal-head { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.cal-head h2 { margin: 0 6px; font-size: 18px; flex: 1; }
+.cal-head .icon-btn { width: 34px; height: 34px; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.cal-dow { font-size: 11px; font-weight: 700; color: var(--muted); text-align: center; text-transform: uppercase; letter-spacing: .05em; padding-bottom: 2px; }
+.cal-day { border: 1px solid var(--border); background: var(--surface); border-radius: 10px; min-height: 74px; padding: 5px 6px; text-align: left; display: flex; flex-direction: column; gap: 3px; cursor: pointer; }
+.cal-day:hover { border-color: var(--accent); }
+.cal-day.other { opacity: .45; }
+.cal-day.today .num { background: var(--accent); color: var(--accent-text); }
+.cal-day.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.cal-day .num { font-size: 13px; font-weight: 600; width: 24px; height: 24px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; }
+.cal-dots { display: flex; flex-wrap: wrap; gap: 3px; }
+.cal-dot { font-size: 10px; font-weight: 700; border-radius: 999px; padding: 0 6px; line-height: 16px; }
+.cal-dot.r { background: var(--accent-soft); color: var(--accent); }
+.cal-dot.r.over { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+.cal-dot.r.done { background: var(--surface-2); color: var(--muted); }
+.cal-dot.n { background: var(--surface-2); color: var(--muted); }
+@media (max-width: 820px) {
+  .cal-day { min-height: 50px; padding: 3px; align-items: center; }
+  .cal-day .num { font-size: 12px; width: 22px; height: 22px; }
+  .cal-dot { padding: 0 4px; font-size: 9px; line-height: 14px; }
+}
+.cal-agenda h3 { margin: 0 0 10px; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+.cal-agenda h3 .spacer { flex: 1; }
+.cal-agenda h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 2px 8px; }
+.cal-agenda .note { font-size: 14px; }
+
 .notice { background: var(--accent-soft); color: var(--text); border-radius: 12px; padding: 10px 14px; font-size: 13px; margin-bottom: 14px; }
 
 /* ---------- Settings ---------- */
@@ -356,6 +393,7 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
       <button class="tab active" data-view="feed">Feed</button>
       <button class="tab" data-view="board">Board</button>
       <button class="tab" data-view="reminders">Reminders <span class="badge hidden" id="rem-badge"></span></button>
+      <button class="tab" data-view="calendar">Calendar</button>
     </nav>
   </header>
 
@@ -410,6 +448,7 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
 
     <section id="view-board" class="hidden"></section>
     <section id="view-reminders" class="hidden"></section>
+    <section id="view-calendar" class="hidden"></section>
   </main>
 </div>
 
@@ -438,6 +477,7 @@ const state = {
   notes: [], hasMore: false, loading: false,
   tag: null, pinned: false, archived: false, todo: false, archivedCount: 0, query: '',
   appending: null, expanded: new Set(), children: {}, childCounts: {}, parentTitles: {},
+  remEditing: null, cal: { month: null, selected: null, notes: [] },
   tags: [], settings: null, reminders: [],
   files: [], remindMode: false, editing: null,
   boardNotes: {}, boardPicking: false, pickTags: [],
@@ -608,6 +648,7 @@ function onNoteChange({ eventType, new: row, old }) {
   if (state.editing == null) { renderFeed(); if (state.view === 'board') loadBoard(); }
   scheduleTagRefresh();
   scheduleNestingRefresh();
+  if (state.view === 'calendar') { clearTimeout(calTimer); calTimer = setTimeout(loadCalendarNotes, 500); }
 }
 
 let tagTimer = null;
@@ -762,10 +803,11 @@ function replaceNote(row) {
   if (i >= 0) state.notes[i] = row;
   for (const k in state.boardNotes) state.boardNotes[k] = state.boardNotes[k].map((n) => (n.id === row.id ? row : n));
   for (const k in state.children) state.children[k] = state.children[k].map((n) => (n.id === row.id ? row : n));
+  state.cal.notes = state.cal.notes.map((n) => (n.id === row.id ? row : n));
   rerender();
 }
-function findNote(id) { return state.notes.find((n) => n.id === id) || Object.values(state.children).flat().find((n) => n.id === id) || Object.values(state.boardNotes).flat().find((n) => n.id === id); }
-function rerender() { renderFeed(); if (state.view === 'board') renderBoard(); focusEdit(); }
+function findNote(id) { return state.notes.find((n) => n.id === id) || Object.values(state.children).flat().find((n) => n.id === id) || Object.values(state.boardNotes).flat().find((n) => n.id === id) || state.cal.notes.find((n) => n.id === id); }
+function rerender() { renderFeed(); if (state.view === 'board') renderBoard(); if (state.view === 'calendar') renderCalendar(); focusEdit(); }
 function focusEdit() { const et = $('#edit-text'); if (et && document.activeElement !== et) { et.focus(); et.setSelectionRange(et.value.length, et.value.length); } }
 function markQueued(id) { const n = state.notes.find((x) => x.id === id); if (n) { n._queued = true; renderFeed(); } }
 
@@ -1442,10 +1484,12 @@ function switchView(v) {
   $('#view-feed').classList.toggle('hidden', v !== 'feed');
   $('#view-board').classList.toggle('hidden', v !== 'board');
   $('#view-reminders').classList.toggle('hidden', v !== 'reminders');
+  $('#view-calendar').classList.toggle('hidden', v !== 'calendar');
   $('#aside').classList.toggle('hidden', v !== 'feed');
   $('#main').classList.toggle('wide', v !== 'feed');
   if (v === 'board') loadBoard();
   if (v === 'reminders') renderReminders();
+  if (v === 'calendar') { renderCalendar(); loadCalendarNotes(); }
 }
 
 // Menu ---------------------------------------------------------------
@@ -1566,7 +1610,12 @@ async function loadReminders() {
   state.reminders = data;
   const overdue = data.filter((r) => !r.done && new Date(r.due_at) <= new Date()).length;
   const b = $('#rem-badge'); b.textContent = overdue; b.classList.toggle('hidden', !overdue);
+  if (!state.remEditing) renderRemViews();
+}
+
+function renderRemViews() {
   if (state.view === 'reminders') renderReminders();
+  if (state.view === 'calendar') renderCalendar();
 }
 
 function whenLabel(d) {
@@ -1600,6 +1649,18 @@ function nextOccurrence(due, repeat) {
 
 function remHtml(r) {
   const due = new Date(r.due_at), overdue = !r.done && due <= new Date();
+  if (state.remEditing === r.id) {
+    return `<div class="rem" data-rem="${r.id}"><div class="rem-edit">
+      <input class="field" data-rem-field="body" value="${esc(r.body)}">
+      <div class="row">
+        <input class="field" type="datetime-local" data-rem-field="at" value="${toLocalInput(due)}">
+        <select class="field" data-rem-field="repeat">
+          <option value="">Once</option>${Object.entries(REPEAT_LABEL).map(([k, v]) => `<option value="${k}"${r.repeat === k ? ' selected' : ''}>${v}</option>`).join('')}
+        </select>
+      </div>
+      <div class="row" style="justify-content:flex-end"><button class="btn ghost small" data-rem-act="edit-cancel">Cancel</button><button class="btn small" data-rem-act="edit-save">Save</button></div>
+    </div></div>`;
+  }
   return `<div class="rem${overdue ? ' overdue' : ''}${r.done ? ' done' : ''}" data-rem="${r.id}">
     <button class="rem-check" data-rem-act="toggle" title="${r.done ? 'Mark not done' : r.repeat ? 'Done, schedule next' : 'Mark done'}">${r.done ? ICON.check : ''}</button>
     <div class="rem-main">
@@ -1611,6 +1672,7 @@ function remHtml(r) {
       </div>
     </div>
     ${r.done ? '' : '<button class="tool" data-rem-act="snooze" title="Snooze 1 hour">+1h</button>'}
+    <button class="tool" data-rem-act="edit" title="Edit">${ICON.edit}</button>
     <button class="tool" data-rem-act="delete" title="Delete">${ICON.trash}</button>
   </div>`;
 }
@@ -1634,27 +1696,179 @@ function renderReminders() {
   $('#view-reminders').innerHTML = html;
 }
 
-$('#view-reminders').addEventListener('click', async (e) => {
+async function onReminderClick(e) {
   const a = e.target.closest('[data-rem-act]')?.dataset.remAct; if (!a) return;
   if (a === 'new') { switchView('feed'); setRemindMode(true); return; }
-  const id = e.target.closest('[data-rem]').dataset.rem;
+  const card = e.target.closest('[data-rem]');
+  const id = card.dataset.rem;
   const r = state.reminders.find((x) => x.id === id); if (!r) return;
   let patch = null;
-  if (a === 'toggle') {
+  if (a === 'edit') { state.remEditing = id; renderRemViews(); card.parentElement.querySelector(`[data-rem="${id}"] [data-rem-field="body"]`)?.focus(); return; }
+  if (a === 'edit-cancel') { state.remEditing = null; renderRemViews(); return; }
+  if (a === 'edit-save') {
+    const body = card.querySelector('[data-rem-field="body"]').value.trim();
+    const at = card.querySelector('[data-rem-field="at"]').value;
+    if (!body || !at) { toast('Text and time are required'); return; }
+    patch = { body, due_at: new Date(at).toISOString(), repeat: card.querySelector('[data-rem-field="repeat"]').value || null };
+    state.remEditing = null;
+  } else if (a === 'toggle') {
     if (!r.done && r.repeat) { patch = { due_at: nextOccurrence(r.due_at, r.repeat).toISOString() }; toast('Next: ' + whenLabel(patch.due_at)); }
     else patch = { done: !r.done };
   } else if (a === 'snooze') {
     patch = { due_at: new Date(Math.max(Date.now(), new Date(r.due_at)) + 3600e3).toISOString() };
   } else if (a === 'delete') {
-    state.reminders = state.reminders.filter((x) => x.id !== id); renderReminders();
+    state.reminders = state.reminders.filter((x) => x.id !== id); renderRemViews();
     const { error } = await sb.from('reminders').delete().eq('id', id);
     if (error) toast('Couldn\'t delete: ' + error.message);
     loadReminders(); return;
   }
-  Object.assign(r, patch); renderReminders();
+  Object.assign(r, patch); renderRemViews();
   const { error } = await sb.from('reminders').update(patch).eq('id', id);
   if (error) toast('Couldn\'t update: ' + error.message);
   loadReminders();
+}
+$('#view-reminders').addEventListener('click', onReminderClick);
+$('#view-reminders').addEventListener('keydown', (e) => {
+  if (e.target.closest('.rem-edit') && e.key === 'Escape') { state.remEditing = null; renderRemViews(); }
+});
+
+// ------------------------------------------------------------------
+// Calendar: month grid of reminders (incl. future repeats) and notes
+// ------------------------------------------------------------------
+let calTimer = null;
+const pad2 = (x) => String(x).padStart(2, '0');
+const dayKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const keyToDate = (k) => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d); };
+
+function calRange() {
+  const m = state.cal.month;
+  const start = new Date(m.getFullYear(), m.getMonth(), 1);
+  start.setDate(start.getDate() - start.getDay());           // back to Sunday
+  const end = new Date(start); end.setDate(end.getDate() + 42); // 6 weeks
+  return { start, end };
+}
+
+// Occurrences of a reminder between from and to, in local time, using the
+// same rules as the server (anchored to the original date; month-end clamps).
+function occurrences(r, from, to) {
+  const d0 = new Date(r.due_at);
+  if (!r.repeat || r.done) return d0 >= from && d0 < to ? [d0] : [];
+  const at = (k) => {
+    const y = d0.getFullYear(), mo = d0.getMonth(), d = d0.getDate(), h = d0.getHours(), mi = d0.getMinutes();
+    if (r.repeat === 'daily' || r.repeat === 'weekdays') {
+      const x = new Date(y, mo, d + k, h, mi);
+      return r.repeat === 'weekdays' && (x.getDay() === 0 || x.getDay() === 6) ? null : x;
+    }
+    if (r.repeat === 'weekly') return new Date(y, mo, d + 7 * k, h, mi);
+    const months = r.repeat === 'monthly' ? k : 12 * k;
+    const first = new Date(y, mo + months, 1, h, mi);
+    first.setDate(Math.min(d, new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate()));
+    return first;
+  };
+  const days = Math.floor((from - d0) / 864e5);
+  let k = Math.max(0, r.repeat === 'weekly' ? Math.floor(days / 7) - 1
+    : r.repeat === 'monthly' ? Math.floor(days / 31) - 1
+    : r.repeat === 'yearly' ? Math.floor(days / 366) - 1 : days - 1);
+  const out = [];
+  for (let n = 0; n < 400; n++, k++) {
+    const x = at(k);
+    if (!x) continue;
+    if (x >= to) break;
+    if (x >= from && x >= d0) out.push(x);
+  }
+  return out;
+}
+
+async function loadCalendarNotes() {
+  if (!state.cal.month) return;
+  const { start, end } = calRange();
+  const { data } = await sb.from('notes').select(NOTE_SELECT).is('archived_at', null)
+    .gte('created_at', start.toISOString()).lt('created_at', end.toISOString()).order('created_at').limit(2000);
+  state.cal.notes = data || [];
+  if (state.view === 'calendar') renderCalendar();
+}
+
+function renderCalendar() {
+  if (!state.cal.month) { const t = new Date(); state.cal.month = new Date(t.getFullYear(), t.getMonth(), 1); state.cal.selected = dayKey(t); }
+  const { start, end } = calRange();
+  const now = new Date(), todayKey = dayKey(now), month = state.cal.month.getMonth();
+  const rems = {}, notes = {};
+  for (const r of state.reminders) {
+    for (const at of occurrences(r, start, end)) {
+      (rems[dayKey(at)] ||= []).push({ r, at, real: at.getTime() === new Date(r.due_at).getTime() });
+    }
+  }
+  for (const n of state.cal.notes) (notes[dayKey(new Date(n.created_at))] ||= []).push(n);
+
+  let grid = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((d) => `<div class="cal-dow">${d}</div>`).join('');
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+    const k = dayKey(d), rs = rems[k] || [], ns = notes[k] || [];
+    const open = rs.filter((x) => !x.r.done), over = open.some((x) => x.real && x.at <= now);
+    const cls = ['cal-day', d.getMonth() !== month && 'other', k === todayKey && 'today', k === state.cal.selected && 'selected'].filter(Boolean).join(' ');
+    grid += `<button class="${cls}" data-day="${k}" aria-label="${esc(d.toDateString())}"><span class="num">${d.getDate()}</span><span class="cal-dots">`
+      + (rs.length ? `<span class="cal-dot r${over ? ' over' : open.length ? '' : ' done'}" title="Reminders">⏰${rs.length}</span>` : '')
+      + (ns.length ? `<span class="cal-dot n" title="Notes">✎${ns.length}</span>` : '')
+      + '</span></button>';
+  }
+
+  const sel = state.cal.selected, selDate = keyToDate(sel);
+  const dayRems = (rems[sel] || []).sort((a, b) => a.at - b.at);
+  const dayNotes = notes[sel] || [];
+  const remRows = dayRems.map(({ r, at, real }) => real ? remHtml(r)
+    : `<div class="rem projected"><div class="rem-main"><div class="rem-text">${formatBody(r.body)}</div>
+        <div class="rem-when"><span>${esc(timeLabel(at))}</span><span class="src">↻ ${REPEAT_LABEL[r.repeat]}</span></div></div></div>`).join('');
+  const label = selDate.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: selDate.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
+
+  $('#view-calendar').innerHTML = `<div class="cal-wrap">
+    <div>
+      <div class="cal-head">
+        <button class="icon-btn" data-cal="prev" aria-label="Previous month">‹</button>
+        <h2>${esc(state.cal.month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' }))}</h2>
+        <button class="btn ghost small" data-cal="today">Today</button>
+        <button class="icon-btn" data-cal="next" aria-label="Next month">›</button>
+      </div>
+      <div class="cal-grid">${grid}</div>
+    </div>
+    <div class="cal-agenda">
+      <h3>${esc(label)}<span class="spacer"></span><button class="btn small" data-cal="add">+ Reminder</button></h3>
+      <h4>Reminders</h4>
+      ${remRows || '<p style="color:var(--muted);margin:0">Nothing scheduled.</p>'}
+      <h4>Notes</h4>
+      ${dayNotes.map((n) => noteHtml(n, true)).join('') || '<p style="color:var(--muted);margin:0">No notes this day.</p>'}
+    </div>
+  </div>`;
+  hydrateAttachments($('#view-calendar'));
+}
+
+$('#view-calendar').addEventListener('click', (e) => {
+  const day = e.target.closest('[data-day]');
+  if (day) {
+    state.cal.selected = day.dataset.day;
+    const d = keyToDate(day.dataset.day);
+    if (d.getMonth() !== state.cal.month.getMonth()) { state.cal.month = new Date(d.getFullYear(), d.getMonth(), 1); loadCalendarNotes(); }
+    renderCalendar(); return;
+  }
+  const c = e.target.closest('[data-cal]')?.dataset.cal;
+  if (c === 'prev' || c === 'next') {
+    const m = state.cal.month;
+    state.cal.month = new Date(m.getFullYear(), m.getMonth() + (c === 'next' ? 1 : -1), 1);
+    renderCalendar(); loadCalendarNotes(); return;
+  }
+  if (c === 'today') {
+    const t = new Date();
+    state.cal.month = new Date(t.getFullYear(), t.getMonth(), 1); state.cal.selected = dayKey(t);
+    renderCalendar(); loadCalendarNotes(); return;
+  }
+  if (c === 'add') {
+    const d = keyToDate(state.cal.selected), now = new Date();
+    d.setHours(9, 0, 0, 0);
+    if (d <= now) { d.setTime(now.getTime() + 3600e3); d.setMinutes(0, 0, 0); }
+    switchView('feed'); setRemindMode(true);
+    $('#remind-at').value = toLocalInput(d);
+    return;
+  }
+  if (e.target.closest('[data-rem-act]')) onReminderClick(e);
 });
 
 function checkDueReminders() {
