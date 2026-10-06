@@ -15,8 +15,8 @@ inbox/NAME.json with its file-writing tool, so user text never passes
 through a shell. The shell command contains only fixed, safe tokens.
 
     call NAME.json   ops: add_note, search_notes, get_note, edit_note, append_note,
-                     attach_photos, add_reminder, list_reminders, edit_reminder,
-                     calendar
+                     check_items, list_tags, attach_photos, add_reminder,
+                     list_reminders, edit_reminder, calendar
                      add_note / attach_photos take "photos": [image files that
                      are also in inbox/]; each is uploaded, then deleted.
 
@@ -47,7 +47,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 CONFIG_DIR = os.path.expanduser(os.environ.get("BRAINFEED_CONFIG_DIR", "~/.config/brainfeed"))
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
@@ -66,6 +66,8 @@ CALL_OPS = {
     "get_note": ("POST", "/v1/notes/get"),
     "edit_note": ("POST", "/v1/notes/update"),
     "append_note": ("POST", "/v1/notes/append"),
+    "check_items": ("POST", "/v1/notes/check"),
+    "list_tags": ("POST", "/v1/tags"),
     "calendar": ("POST", "/v1/calendar"),
     "attach_photos": None,  # handled locally: uploads inbox photos to a note
     "add_reminder": ("POST", "/v1/reminders"),
@@ -150,10 +152,13 @@ def api(method, path, body=None, token=None, raw=None):
     except urllib.error.HTTPError as e:
         # Report only status + the server's message; never request headers.
         try:
-            msg = json.loads(e.read().decode()).get("message", "")
+            payload = json.loads(e.read().decode())
+            msg, code = payload.get("message", ""), payload.get("error", "")
         except Exception:
-            msg = ""
-        err = HelperError(f"BrainFeed API error {e.code}: {msg or e.reason}")
+            msg, code = "", ""
+        # The short error code (e.g. "ambiguous", "no_match") tells the agent what to do next.
+        tag = f" ({code})" if isinstance(code, str) and code and len(code) <= 32 and code.replace("_", "").isalpha() else ""
+        err = HelperError(f"BrainFeed API error {e.code}{tag}: {msg or e.reason}")
         err.status = e.code
         raise err from None
     except urllib.error.URLError as e:

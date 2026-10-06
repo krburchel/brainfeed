@@ -1,8 +1,9 @@
-// BrainFeed agent API (v1).
+// BrainFeed agent API (v1, revision 6).
 //
 // A deliberately small, fixed set of operations for an agent like Hermes
-// or an iPhone Shortcut: add / search / edit notes, attach photos, add /
-// search / edit reminders, and claim/ack due reminders for delivery.
+// or an iPhone Shortcut: add / search / edit notes (incl. nesting and
+// checklist ticks), list tags, attach photos, add / search / edit
+// reminders, and claim/ack due reminders for delivery.
 // No deletes, no arbitrary queries.
 //
 // Auth: "X-BrainFeed-Token: <64 hex chars>" (a bearer token in a custom
@@ -116,6 +117,43 @@ function source(v: unknown) {
   if (v === undefined) return 'hermes';
   if (typeof v !== 'string' || !SOURCES.includes(v)) throw bad(`source must be one of: ${SOURCES.join(', ')}`);
   return v;
+}
+
+// Database rule violations worth showing the agent as-is (nesting trigger).
+function dbError(error: { message?: string } | null, fallback: string) {
+  const m = error?.message || '';
+  if (/cannot contain itself|cannot hold other notes|cannot be moved inside another/.test(m)) return bad(m);
+  return new ApiError(500, 'db_error', fallback);
+}
+function optUuid(v: unknown, field: string) {
+  if (v === undefined) return undefined;
+  if (v === null) return null;
+  return uuid(v, field);
+}
+const firstLine = (body: string) => (body.split('\n').find((l) => l.trim()) || '').replace(/^#{1,3} |^\s*[-*] \[[ xX]\] /, '').slice(0, 80);
+
+// Checklists are plain-text lines: "- [ ] milk" / "- [x] eggs" (same rule as the web app).
+const CHECK_RE = /^(\s*[-*] \[)([ xX])(\] ?)(.*)$/;
+function checklist(body: string) {
+  return body.split('\n').flatMap((l, i) => { const m = l.match(CHECK_RE); return m ? [{ line: i, done: m[2] !== ' ', text: m[4] }] : []; });
+}
+type Item = ReturnType<typeof checklist>[number];
+// An item is picked by its number (1 = first checklist item) or by its text:
+// an exact (case-insensitive) match wins, otherwise the text must be in exactly one item.
+function pickItem(items: Item[], sel: unknown, field: string): Item {
+  if (Number.isInteger(sel)) {
+    const it = items[(sel as number) - 1];
+    if (!it) throw bad(`${field}: there is no item ${sel} (the note has ${items.length})`);
+    return it;
+  }
+  if (typeof sel !== 'string' || !sel.trim() || sel.length > 500) throw bad(`${field} entries must be item numbers or item text`);
+  const q = sel.trim().toLowerCase();
+  const exact = items.filter((x) => x.text.trim().toLowerCase() === q);
+  if (exact.length === 1) return exact[0];
+  const part = exact.length ? exact : items.filter((x) => x.text.toLowerCase().includes(q));
+  if (part.length === 1) return part[0];
+  if (!part.length) throw new ApiError(400, 'no_match', `${field}: no checklist item matches "${sel}"`);
+  throw new ApiError(400, 'ambiguous', `${field}: "${sel}" matches ${part.length} items (${part.map((x) => x.text).join(' | ')}); use the item number`);
 }
 
 // --------------------------------------------------------- time zones
@@ -301,23 +339,29 @@ const routes: Record<string, Handler> = {
   },
 
   'POST /v1/notes': async (c, b) => {
-    only(b, ['body', 'tags', 'source']);
+    only(b, ['body', 'tags', 'source', 'parent_id']);
     const text = str(b.body, 'body', { required: true })!;
+    const parent = optUuid(b.parent_id, 'parent_id') ?? null;
     const { data, error } = await db.from('notes')
-      .insert({ user_id: c.userId, body: text, tags: tags(b.tags, 'tags'), source: source(b.source) })
+      .insert({ user_id: c.userId, body: text, tags: tags(b.tags, 'tags'), source: source(b.source), parent_id: parent })
       .select(NOTE_COLS).single();
-    if (error) throw new ApiError(500, 'db_error', 'Could not save note');
+    if (error) throw dbError(error, 'Could not save note');
     return { note: data, message: 'Saved to BrainFeed ✓' };
   },
 
   'POST /v1/notes/search': async (c, b) => {
-    only(b, ['q', 'tags', 'pinned', 'limit', 'before']);
+    only(b, ['q', 'tags', 'pinned', 'limit', 'before', 'archived', 'parent_id']);
     const q = str(b.q, 'q', { max: 200 }) || '';
     const tagList = tags(b.tags, 'tags');
     let query = db.from('notes').select(NOTE_COLS).eq('user_id', c.userId)
       .order('created_at', { ascending: false }).limit(int(b.limit, 'limit', 20, 1, 50));
     if (tagList.length) query = query.contains('tags', tagList);
     if (bool(b.pinned, 'pinned') !== undefined) query = query.eq('pinned', b.pinned as boolean);
+    // archived: true = only archived, false = leave them out; omitted = both.
+    const arch = bool(b.archived, 'archived');
+    if (arch === true) query = query.not('archived_at', 'is', null);
+    if (arch === false) query = query.is('archived_at', null);
+    if (b.parent_id !== undefined) query = query.eq('parent_id', uuid(b.parent_id, 'parent_id'));
     if (b.before !== undefined) {
       const d = new Date(String(b.before));
       if (isNaN(d.getTime())) throw bad('before must be an ISO date');
@@ -336,11 +380,20 @@ const routes: Record<string, Handler> = {
     only(b, ['id']);
     const { data } = await db.from('notes').select(NOTE_COLS).eq('user_id', c.userId).eq('id', uuid(b.id)).maybeSingle();
     if (!data) throw new ApiError(404, 'not_found', 'Note not found');
-    return { note: data };
+    const [{ data: kids }, { data: parent }] = await Promise.all([
+      db.from('notes').select('id,body,archived_at').eq('user_id', c.userId).eq('parent_id', data.id).order('created_at').limit(100),
+      data.parent_id ? db.from('notes').select('id,body').eq('user_id', c.userId).eq('id', data.parent_id).maybeSingle() : Promise.resolve({ data: null }),
+    ]);
+    return {
+      note: data,
+      parent: parent ? { id: parent.id, first_line: firstLine(parent.body as string) } : null,
+      children: (kids || []).map((k) => ({ id: k.id, first_line: firstLine(k.body as string), archived: !!k.archived_at })),
+      checklist: checklist(data.body as string).map((x, i) => ({ n: i + 1, done: x.done, text: x.text })),
+    };
   },
 
   'POST /v1/notes/update': async (c, b) => {
-    only(b, ['id', 'body', 'add_tags', 'remove_tags', 'pinned', 'archived']);
+    only(b, ['id', 'body', 'add_tags', 'remove_tags', 'pinned', 'archived', 'parent_id']);
     const id = uuid(b.id);
     const { data: cur } = await db.from('notes').select('id,tags').eq('user_id', c.userId).eq('id', id).maybeSingle();
     if (!cur) throw new ApiError(404, 'not_found', 'Note not found');
@@ -349,15 +402,18 @@ const routes: Record<string, Handler> = {
     const add = tags(b.add_tags, 'add_tags'), remove = tags(b.remove_tags, 'remove_tags');
     const pinned = bool(b.pinned, 'pinned');
     const archived = bool(b.archived, 'archived');
-    if (text === undefined && !add.length && !remove.length && pinned === undefined && archived === undefined) throw bad('Nothing to update');
+    // parent_id: a note id moves this note inside it; null takes it out.
+    const parent = optUuid(b.parent_id, 'parent_id');
+    if (text === undefined && !add.length && !remove.length && pinned === undefined && archived === undefined && parent === undefined) throw bad('Nothing to update');
     // Body first: the database re-derives #hashtags from the new text.
-    if (text !== undefined || pinned !== undefined || archived !== undefined) {
+    if (text !== undefined || pinned !== undefined || archived !== undefined || parent !== undefined) {
       const patch: Record<string, unknown> = {};
       if (text !== undefined) patch.body = text;
       if (pinned !== undefined) patch.pinned = pinned;
       if (archived !== undefined) patch.archived_at = archived ? new Date().toISOString() : null;
+      if (parent !== undefined) patch.parent_id = parent;
       const { error } = await db.from('notes').update(patch).eq('user_id', c.userId).eq('id', id);
-      if (error) throw new ApiError(500, 'db_error', 'Could not update note');
+      if (error) throw dbError(error, 'Could not update note');
     }
     if (add.length || remove.length) {
       const { data: now } = await db.from('notes').select('tags').eq('user_id', c.userId).eq('id', id).single();
@@ -384,6 +440,61 @@ const routes: Record<string, Handler> = {
     if (!rows?.length) throw bad('Note would be too long');
     const { data } = await db.from('notes').select(NOTE_COLS).eq('user_id', c.userId).eq('id', id).single();
     return { note: data, message: 'Added to the note ✓' };
+  },
+
+  'POST /v1/notes/check': async (c, b) => {
+    only(b, ['id', 'check', 'uncheck', 'add']);
+    const id = uuid(b.id);
+    const list = (v: unknown, field: string) => {
+      if (v === undefined) return [];
+      if (!Array.isArray(v) || !v.length || v.length > 50) throw bad(`${field} must be a list of 1-50 entries`);
+      return v;
+    };
+    const check = list(b.check, 'check'), uncheck = list(b.uncheck, 'uncheck');
+    const add = list(b.add, 'add').map((t) => str(t, 'add item', { required: true, max: 500 })!.replace(/\s*\n\s*/g, ' '));
+    if (!check.length && !uncheck.length && !add.length) throw bad('Send check, uncheck or add');
+    // Optimistic write: only lands if nobody changed the note since we read it.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const { data: cur } = await db.from('notes').select('body,updated_at').eq('user_id', c.userId).eq('id', id).maybeSingle();
+      if (!cur) throw new ApiError(404, 'not_found', 'Note not found');
+      const lines = (cur.body as string).split('\n');
+      const items = checklist(cur.body as string);
+      const set = (sel: unknown, field: string, done: boolean) => {
+        const it = pickItem(items, sel, field);
+        lines[it.line] = lines[it.line].replace(CHECK_RE, (_m, a, _x, z, t) => a + (done ? 'x' : ' ') + z + t);
+        return it.text;
+      };
+      const checked = check.map((x) => set(x, 'check', true));
+      const unchecked = uncheck.map((x) => set(x, 'uncheck', false));
+      if (add.length) {
+        const at = items.length ? items[items.length - 1].line + 1 : lines.length;
+        const fresh = add.map((t) => '- [ ] ' + t);
+        if (!items.length && lines.length && lines[lines.length - 1].trim()) fresh.unshift('');
+        lines.splice(at, 0, ...fresh);
+      }
+      const body = lines.join('\n');
+      if (body.length > MAX_BODY) throw bad('Note would be too long');
+      const { data: rows, error } = await db.from('notes').update({ body }).eq('user_id', c.userId).eq('id', id)
+        .eq('updated_at', cur.updated_at).select(NOTE_COLS);
+      if (error) throw new ApiError(500, 'db_error', 'Could not update note');
+      if (rows?.length) {
+        const now = checklist(rows[0].body as string);
+        return {
+          note: rows[0], checked, unchecked, added: add,
+          checklist: now.map((x, i) => ({ n: i + 1, done: x.done, text: x.text })),
+          message: `${now.filter((x) => x.done).length}/${now.length} done`,
+        };
+      }
+    }
+    throw new ApiError(409, 'conflict', 'The note kept changing; try again');
+  },
+
+  'POST /v1/tags': async (c, b) => {
+    only(b, ['limit']);
+    const { data, error } = await db.rpc('bf_tag_counts', { p_user: c.userId });
+    if (error) throw new ApiError(500, 'db_error', 'Tag lookup failed');
+    const limit = int(b.limit, 'limit', 200, 1, 500);
+    return { tags: (data || []).slice(0, limit).map((t: { tag: string; count: number }) => ({ tag: t.tag, count: Number(t.count) })) };
   },
 
   'POST /v1/calendar': async (c, b) => {

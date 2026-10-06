@@ -529,6 +529,89 @@ class Review131(unittest.TestCase):
         run("deliver")  # tidy: deliver it so it doesn't linger as overdue
 
 
+class Skill14(unittest.TestCase):
+    """Skill 1.4: list_tags, check_items, notes inside notes, archived filter."""
+
+    def call(self, obj, name="s14.json", check=True):
+        inbox = os.path.join(DIR_A, "inbox")
+        os.makedirs(inbox, mode=0o700, exist_ok=True)
+        with open(os.path.join(inbox, name), "w") as f:
+            json.dump(obj, f)
+        p = run("call", name, check=check)
+        return json.loads(p.stdout) if p.returncode == 0 else p
+
+    def test_list_tags_counts_and_skips_archived(self):
+        t = "tg" + os.urandom(3).hex()
+        j("add", f"one #{t}"); j("add", f"two #{t}")
+        gone = j("add", f"three #{t}")["note"]
+        self.call({"op": "edit_note", "id": gone["id"], "archived": True})
+        tags = {x["tag"]: x["count"] for x in self.call({"op": "list_tags"})["tags"]}
+        self.assertEqual(tags[t], 2)
+        self.assertIn("400", self.call({"op": "list_tags", "user_id": "x"}, check=False).stderr)
+
+    def test_check_items(self):
+        n = j("add", "# Groceries\n- [ ] Milk\n- [ ] eggs\n- [x] Bread\n- [ ] oat milk\nnotes after")["note"]
+        out = self.call({"op": "check_items", "id": n["id"], "check": ["eggs"], "uncheck": [3], "add": ["Coffee"]})
+        self.assertEqual([(x["text"], x["done"]) for x in out["checklist"]],
+                         [("Milk", False), ("eggs", True), ("Bread", False), ("oat milk", False), ("Coffee", False)])
+        self.assertTrue(out["note"]["body"].endswith("- [ ] Coffee\nnotes after"))
+        self.assertEqual(out["message"], "1/5 done")
+        # "milk" is exactly item 1 (exact match beats "oat milk"); "mil" is ambiguous
+        self.assertEqual(self.call({"op": "check_items", "id": n["id"], "check": ["milk"]})["checked"], ["Milk"])
+        self.assertIn("ambiguous", self.call({"op": "check_items", "id": n["id"], "check": ["mil"]}, check=False).stderr)
+        self.assertIn("no_match", self.call({"op": "check_items", "id": n["id"], "check": ["kale"]}, check=False).stderr)
+        self.assertIn("no item 9", self.call({"op": "check_items", "id": n["id"], "check": [9]}, check=False).stderr)
+        got = self.call({"op": "get_note", "id": n["id"]})
+        self.assertEqual([x["n"] for x in got["checklist"]], [1, 2, 3, 4, 5])
+        self.assertIn("404", self.call({"op": "check_items", "id": NOTE_B, "add": ["x"]}, check=False).stderr)
+
+    def test_check_items_starts_a_list(self):
+        n = j("add", "Packing for the trip")["note"]
+        out = self.call({"op": "check_items", "id": n["id"], "add": ["charger", "socks"]})
+        self.assertEqual(out["note"]["body"], "Packing for the trip\n\n- [ ] charger\n- [ ] socks")
+
+    def test_concurrent_checks_all_land(self):
+        import concurrent.futures
+        n = j("add", "\n".join(f"- [ ] item{i}" for i in range(4)))["note"]
+        def one(i):
+            inbox = os.path.join(DIR_A, "inbox")
+            with open(os.path.join(inbox, f"ck{i}.json"), "w") as f:
+                json.dump({"op": "check_items", "id": n["id"], "check": [f"item{i}"]}, f)
+            return run("call", f"ck{i}.json", check=False).returncode
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+            self.assertEqual(list(ex.map(one, range(4))), [0] * 4)
+        self.assertTrue(all(x["done"] for x in self.call({"op": "get_note", "id": n["id"]})["checklist"]))
+
+    def test_notes_inside_notes(self):
+        outer = j("add", "Shiny hunts " + os.urandom(3).hex())["note"]
+        kid = self.call({"op": "add_note", "body": "Charmander: 1,204 eggs", "parent_id": outer["id"]})["note"]
+        self.assertEqual(kid["parent_id"], outer["id"])
+        loose = j("add", "Pikachu hunt")["note"]
+        self.call({"op": "edit_note", "id": loose["id"], "parent_id": outer["id"]})
+        got = self.call({"op": "get_note", "id": outer["id"]})
+        self.assertEqual([c["id"] for c in got["children"]], [kid["id"], loose["id"]])
+        self.assertEqual(self.call({"op": "get_note", "id": kid["id"]})["parent"]["id"], outer["id"])
+        inside = self.call({"op": "search_notes", "parent_id": outer["id"]})["notes"]
+        self.assertEqual({x["id"] for x in inside}, {kid["id"], loose["id"]})
+        # one level only, and never into someone else's note (same answer, nothing leaked)
+        self.assertIn("cannot hold other notes", self.call({"op": "add_note", "body": "x", "parent_id": kid["id"]}, check=False).stderr)
+        other = j("add", "standalone")["note"]
+        self.assertIn("cannot be moved inside", self.call({"op": "edit_note", "id": outer["id"], "parent_id": other["id"]}, check=False).stderr)
+        self.assertIn("cannot hold other notes", self.call({"op": "add_note", "body": "x", "parent_id": NOTE_B}, check=False).stderr)
+        out = self.call({"op": "edit_note", "id": loose["id"], "parent_id": None})["note"]
+        self.assertIsNone(out["parent_id"])
+
+    def test_search_archived_filter(self):
+        w = "arch" + os.urandom(3).hex()
+        keep = j("add", f"{w} keep")["note"]
+        gone = j("add", f"{w} gone")["note"]
+        self.call({"op": "edit_note", "id": gone["id"], "archived": True})
+        ids = lambda **kw: {x["id"] for x in self.call({"op": "search_notes", "q": w, **kw})["notes"]}
+        self.assertEqual(ids(), {keep["id"], gone["id"]})
+        self.assertEqual(ids(archived=False), {keep["id"]})
+        self.assertEqual(ids(archived=True), {gone["id"]})
+
+
 class Outage(unittest.TestCase):
     """Delivery failures are silent at first, alert once, then recover once."""
 
