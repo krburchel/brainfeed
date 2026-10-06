@@ -415,17 +415,19 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
     <img src="icon-192.png" alt="">
     <h1>BrainFeed</h1>
     <p>The private feed for your brain.</p>
-    <form id="auth-form">
-      <input class="field" type="email" id="auth-email" placeholder="Email" autocomplete="email" required>
-      <input class="field" type="password" id="auth-pass" placeholder="Password" autocomplete="current-password" minlength="8" required>
+    <form id="auth-form" method="post" action="#">
+      <input class="field" type="email" id="auth-email" name="username" placeholder="Email" autocomplete="username" autocapitalize="off" spellcheck="false" required>
+      <input class="field" type="password" id="auth-pass" name="password" placeholder="Password" autocomplete="current-password" minlength="8" required>
       <button class="btn" type="submit" id="auth-submit">Sign in</button>
       <button class="btn ghost small" type="button" id="auth-forgot">Forgot password?</button>
       <button class="btn ghost small" type="button" id="auth-toggle">First time? Create your account</button>
       <div class="auth-msg" id="auth-msg"></div>
     </form>
-    <form id="reset-form" class="hidden">
+    <form id="reset-form" class="hidden" method="post" action="#">
       <p style="margin:0 0 4px">Choose a new password.</p>
-      <input class="field" type="password" id="reset-pass" placeholder="New password (8+ characters)" autocomplete="new-password" minlength="8" required>
+      <!-- Tells the password manager which account the new password belongs to. -->
+      <input type="email" id="reset-user" name="username" autocomplete="username" readonly hidden>
+      <input class="field" type="password" id="reset-pass" name="new-password" placeholder="New password (8+ characters)" autocomplete="new-password" minlength="8" required>
       <input class="field" type="password" id="reset-pass2" placeholder="Repeat new password" autocomplete="new-password" minlength="8" required>
       <button class="btn" type="submit" id="reset-submit">Save new password</button>
       <div class="auth-msg" id="reset-msg"></div>
@@ -680,7 +682,8 @@ $('#auth-form').onsubmit = async (e) => {
     }
   } catch (err) {
     msg.textContent = /closed/i.test(err.message) || /Database error/i.test(err.message)
-      ? 'Signups are closed for this BrainFeed.' : err.message;
+      ? 'Signups are closed for this BrainFeed.'
+      : err.code === 'invalid_credentials' ? 'Wrong email or password. Use "Forgot password?" below if you need a new one.' : err.message;
   } finally { $('#auth-submit').disabled = false; }
 };
 
@@ -697,6 +700,7 @@ $('#auth-forgot').onclick = async () => {
 };
 
 function showReset() {
+  sb.auth.getSession().then(({ data }) => { $('#reset-user').value = data.session?.user?.email || ''; });
   $('#app').classList.add('hidden');
   $('#auth').classList.remove('hidden');
   $('#auth-form').classList.add('hidden');
@@ -747,6 +751,7 @@ function showAuth() {
 // ------------------------------------------------------------------
 let realtime = null, reminderTimer = null;
 async function startApp() {
+  try { navigator.storage?.persist?.(); } catch {}
   $('#auth').classList.add('hidden');
   $('#app').classList.remove('hidden');
   $('#who').textContent = state.user.email;
