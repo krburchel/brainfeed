@@ -54,7 +54,7 @@ file name.
 |---|---|
 | `add_note` | `body` (Kevin's words, verbatim), `tags` (optional list), `source`: `"telegram"` or `"discord"`, `parent_id` (optional: save it **inside** that note) |
 | `search_notes` | `q` (words AND-ed; `#tag` filters), `tags`, `pinned`, `limit` (≤50), `archived` (`false` = leave archived out, `true` = only archived; omit for both), `parent_id` (list the notes inside that note) |
-| `get_note` | `id`. Also returns `parent` (the note it sits in), `children` (notes inside it) and `checklist` (numbered items with `done`) |
+| `get_note` | `id`. Also returns `parent` (the note it sits in), `children` (notes inside it, first 100; `children_truncated: true` means there are more, so list them with `search_notes` + `parent_id`) and `checklist` (numbered items with `done`) |
 | `edit_note` | `id`, and any of `body`, `add_tags`, `remove_tags`, `pinned`, `archived` (true hides it from the feed and calendar; false brings it back), `parent_id` (a note id moves it inside that note; `null` takes it back out). Archived notes still appear in `search_notes` results, with `archived_at` set |
 | `check_items` | `id`, and any of `check` / `uncheck` (lists of item numbers from `get_note`'s `checklist`, or item text), `add` (list of new item texts, added after the last item). Returns the updated `checklist` and a `message` like "3/5 done" |
 | `list_tags` | `limit` (optional): Kevin's tags with how many notes use each, most-used first |
@@ -101,7 +101,9 @@ Only JPEG, PNG, GIF and WebP are accepted (max 10 MB, up to 10 per note). For ot
 - To add to an existing log-style note, use `append_note` rather than editing the whole body.
 - To tick, untick or add checklist items, use `check_items`, never `edit_note` with a rewritten
   body. If it answers `ambiguous` (the text matches several items), `get_note` and ask Kevin which
-  one, or use the item number. On `no_match`, show him the items instead of guessing.
+  one, or use the item number. On `no_match`, show him the items instead of guessing. On
+`conflict`, the list changed while saving and nothing was changed: `get_note` again and retry
+once with the new numbers (or item text).
 
 **Tags.** Before tagging a note yourself (Kevin didn't type a `#tag`), run `list_tags` and reuse
 an existing tag when one fits (`#groceries`, not a new `#grocery`). Make a new tag only when

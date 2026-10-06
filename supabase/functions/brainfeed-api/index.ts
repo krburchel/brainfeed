@@ -1,4 +1,4 @@
-// BrainFeed agent API (v1, revision 6).
+// BrainFeed agent API (v1, revision 7).
 //
 // A deliberately small, fixed set of operations for an agent like Hermes
 // or an iPhone Shortcut: add / search / edit notes (incl. nesting and
@@ -25,6 +25,7 @@ const SOURCES = ['hermes', 'telegram', 'discord', 'sms', 'ios'];
 const BUCKET = 'attachments';
 const MAX_PHOTO_BYTES = 10 * 1024 * 1024;
 const MAX_BODY = 20000;
+const MAX_CHILDREN = 100;
 const TAG_RE = /^[a-z][\w-]{0,49}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -378,16 +379,20 @@ const routes: Record<string, Handler> = {
 
   'POST /v1/notes/get': async (c, b) => {
     only(b, ['id']);
-    const { data } = await db.from('notes').select(NOTE_COLS).eq('user_id', c.userId).eq('id', uuid(b.id)).maybeSingle();
+    const { data, error } = await db.from('notes').select(NOTE_COLS).eq('user_id', c.userId).eq('id', uuid(b.id)).maybeSingle();
+    if (error) throw new ApiError(500, 'db_error', 'Could not read note');
     if (!data) throw new ApiError(404, 'not_found', 'Note not found');
-    const [{ data: kids }, { data: parent }] = await Promise.all([
-      db.from('notes').select('id,body,archived_at').eq('user_id', c.userId).eq('parent_id', data.id).order('created_at').limit(100),
-      data.parent_id ? db.from('notes').select('id,body').eq('user_id', c.userId).eq('id', data.parent_id).maybeSingle() : Promise.resolve({ data: null }),
+    const [{ data: kids, error: e1 }, { data: parent, error: e2 }] = await Promise.all([
+      db.from('notes').select('id,body,archived_at').eq('user_id', c.userId).eq('parent_id', data.id).order('created_at').limit(MAX_CHILDREN + 1),
+      data.parent_id ? db.from('notes').select('id,body').eq('user_id', c.userId).eq('id', data.parent_id).maybeSingle() : Promise.resolve({ data: null, error: null }),
     ]);
+    if (e1 || e2) throw new ApiError(500, 'db_error', 'Could not read nested notes');
     return {
       note: data,
       parent: parent ? { id: parent.id, first_line: firstLine(parent.body as string) } : null,
-      children: (kids || []).map((k) => ({ id: k.id, first_line: firstLine(k.body as string), archived: !!k.archived_at })),
+      children: (kids || []).slice(0, MAX_CHILDREN).map((k) => ({ id: k.id, first_line: firstLine(k.body as string), archived: !!k.archived_at })),
+      // More than MAX_CHILDREN inside: use search_notes with parent_id (and before) to page.
+      children_truncated: (kids || []).length > MAX_CHILDREN,
       checklist: checklist(data.body as string).map((x, i) => ({ n: i + 1, done: x.done, text: x.text })),
     };
   },
@@ -395,8 +400,6 @@ const routes: Record<string, Handler> = {
   'POST /v1/notes/update': async (c, b) => {
     only(b, ['id', 'body', 'add_tags', 'remove_tags', 'pinned', 'archived', 'parent_id']);
     const id = uuid(b.id);
-    const { data: cur } = await db.from('notes').select('id,tags').eq('user_id', c.userId).eq('id', id).maybeSingle();
-    if (!cur) throw new ApiError(404, 'not_found', 'Note not found');
     const text = str(b.body, 'body');
     if (b.body !== undefined && !text) throw bad('body must not be empty');
     const add = tags(b.add_tags, 'add_tags'), remove = tags(b.remove_tags, 'remove_tags');
@@ -405,23 +408,16 @@ const routes: Record<string, Handler> = {
     // parent_id: a note id moves this note inside it; null takes it out.
     const parent = optUuid(b.parent_id, 'parent_id');
     if (text === undefined && !add.length && !remove.length && pinned === undefined && archived === undefined && parent === undefined) throw bad('Nothing to update');
-    // Body first: the database re-derives #hashtags from the new text.
-    if (text !== undefined || pinned !== undefined || archived !== undefined || parent !== undefined) {
-      const patch: Record<string, unknown> = {};
-      if (text !== undefined) patch.body = text;
-      if (pinned !== undefined) patch.pinned = pinned;
-      if (archived !== undefined) patch.archived_at = archived ? new Date().toISOString() : null;
-      if (parent !== undefined) patch.parent_id = parent;
-      const { error } = await db.from('notes').update(patch).eq('user_id', c.userId).eq('id', id);
-      if (error) throw dbError(error, 'Could not update note');
-    }
-    if (add.length || remove.length) {
-      const { data: now } = await db.from('notes').select('tags').eq('user_id', c.userId).eq('id', id).single();
-      const next = [...new Set([...(now!.tags as string[]), ...add])].filter((t) => !remove.includes(t));
-      const { error } = await db.from('notes').update({ tags: next }).eq('user_id', c.userId).eq('id', id);
-      if (error) throw new ApiError(500, 'db_error', 'Could not update tags');
-    }
-    const { data } = await db.from('notes').select(NOTE_COLS).eq('user_id', c.userId).eq('id', id).single();
+    // One database transaction (bf_update_note): everything lands or nothing does. The body
+    // goes first, so #hashtags are re-derived from it before tags are added or removed.
+    const { data: rows, error } = await db.rpc('bf_update_note', {
+      p_user: c.userId, p_note: id, p_body: text ?? null, p_pinned: pinned ?? null, p_archived: archived ?? null,
+      p_set_parent: parent !== undefined, p_parent: parent ?? null, p_add_tags: add, p_remove_tags: remove,
+    });
+    if (error) throw dbError(error, 'Could not update note');
+    if (!rows?.length) throw new ApiError(404, 'not_found', 'Note not found');
+    const { data, error: e2 } = await db.from('notes').select(NOTE_COLS).eq('user_id', c.userId).eq('id', id).single();
+    if (e2) throw new ApiError(500, 'db_error', 'Could not read the note back');
     return { note: data };
   },
 
@@ -429,7 +425,8 @@ const routes: Record<string, Handler> = {
     only(b, ['id', 'body']);
     const id = uuid(b.id);
     const text = str(b.body, 'body', { required: true })!;
-    const { data: cur } = await db.from('notes').select('id').eq('user_id', c.userId).eq('id', id).maybeSingle();
+    const { data: cur, error: readErr } = await db.from('notes').select('id').eq('user_id', c.userId).eq('id', id).maybeSingle();
+    if (readErr) throw new ApiError(500, 'db_error', 'Could not read note');
     if (!cur) throw new ApiError(404, 'not_found', 'Note not found');
     const tz = await userTz(c.userId);
     const stamp = '— ' + new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
@@ -453,19 +450,28 @@ const routes: Record<string, Handler> = {
     const check = list(b.check, 'check'), uncheck = list(b.uncheck, 'uncheck');
     const add = list(b.add, 'add').map((t) => str(t, 'add item', { required: true, max: 500 })!.replace(/\s*\n\s*/g, ' '));
     if (!check.length && !uncheck.length && !add.length) throw bad('Send check, uncheck or add');
-    // Optimistic write: only lands if nobody changed the note since we read it.
+    // Optimistic write: only lands if nobody changed the note since we read it. On a retry,
+    // an item picked by number must still be the same item (same text) it was the first
+    // time; if the list was reordered in between, refuse rather than tick the wrong one.
+    const firstPick = new Map<string, string>();
     for (let attempt = 0; attempt < 4; attempt++) {
-      const { data: cur } = await db.from('notes').select('body,updated_at').eq('user_id', c.userId).eq('id', id).maybeSingle();
+      const { data: cur, error: readErr } = await db.from('notes').select('body,updated_at').eq('user_id', c.userId).eq('id', id).maybeSingle();
+      if (readErr) throw new ApiError(500, 'db_error', 'Could not read note');
       if (!cur) throw new ApiError(404, 'not_found', 'Note not found');
       const lines = (cur.body as string).split('\n');
       const items = checklist(cur.body as string);
-      const set = (sel: unknown, field: string, done: boolean) => {
+      const set = (sel: unknown, field: string, done: boolean, k: number) => {
         const it = pickItem(items, sel, field);
+        const key = `${field}:${k}`;
+        if (!firstPick.has(key)) firstPick.set(key, it.text);
+        else if (Number.isInteger(sel) && firstPick.get(key) !== it.text) {
+          throw new ApiError(409, 'conflict', `The checklist changed while saving: item ${sel} is now "${it.text}", not "${firstPick.get(key)}". Nothing was changed; read the note again`);
+        }
         lines[it.line] = lines[it.line].replace(CHECK_RE, (_m, a, _x, z, t) => a + (done ? 'x' : ' ') + z + t);
         return it.text;
       };
-      const checked = check.map((x) => set(x, 'check', true));
-      const unchecked = uncheck.map((x) => set(x, 'uncheck', false));
+      const checked = check.map((x, k) => set(x, 'check', true, k));
+      const unchecked = uncheck.map((x, k) => set(x, 'uncheck', false, k));
       if (add.length) {
         const at = items.length ? items[items.length - 1].line + 1 : lines.length;
         const fresh = add.map((t) => '- [ ] ' + t);

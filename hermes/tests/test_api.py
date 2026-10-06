@@ -601,6 +601,54 @@ class Skill14(unittest.TestCase):
         out = self.call({"op": "edit_note", "id": loose["id"], "parent_id": None})["note"]
         self.assertIsNone(out["parent_id"])
 
+    def race(self, *bodies):
+        """Fire API calls at the same instant (raw HTTP, released together by a barrier)."""
+        import concurrent.futures, threading
+        gate = threading.Barrier(len(bodies))
+        def go(pb):
+            gate.wait()
+            return raw("POST", pb[0], pb[1], headers={"X-BrainFeed-Token": TOKEN_A})
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(bodies)) as ex:
+            return list(ex.map(go, bodies))
+
+    def parent_of(self, nid):
+        return self.call({"op": "get_note", "id": nid})["note"]["parent_id"]
+
+    def test_racing_reciprocal_moves_never_make_a_cycle(self):
+        for _ in range(12):
+            a = j("add", "race A")["note"]["id"]; b = j("add", "race B")["note"]["id"]
+            r = self.race(("/v1/notes/update", {"id": a, "parent_id": b}), ("/v1/notes/update", {"id": b, "parent_id": a}))
+            self.assertEqual(sorted(x[0] for x in r), [200, 400], r)
+            pa, pb = self.parent_of(a), self.parent_of(b)
+            self.assertFalse(pa == b and pb == a)
+            self.assertTrue((pa == b) != (pb == a))
+
+    def test_racing_child_add_and_move_never_nests_twice(self):
+        for _ in range(12):
+            a = j("add", "race A")["note"]["id"]; b = j("add", "race B")["note"]["id"]
+            r = self.race(("/v1/notes", {"body": "race child", "parent_id": a}), ("/v1/notes/update", {"id": a, "parent_id": b}))
+            self.assertEqual(sorted(x[0] for x in r), [200, 400], r)
+            kids = self.call({"op": "get_note", "id": a})["children"]
+            self.assertFalse(self.parent_of(a) is not None and kids, "A ended up both inside B and holding a note")
+
+    def test_combined_edit_is_all_or_nothing(self):
+        outer = j("add", "outer")["note"]
+        kid = self.call({"op": "add_note", "body": "kid", "parent_id": outer["id"]})["note"]
+        n = j("add", "original text #keep")["note"]
+        p = self.call({"op": "edit_note", "id": n["id"], "body": "changed #new", "add_tags": ["extra"], "parent_id": kid["id"]}, check=False)
+        self.assertIn("cannot hold other notes", p.stderr)
+        after = j("get", n["id"])["note"]
+        self.assertEqual((after["body"], after["tags"], after["parent_id"]), ("original text #keep", ["keep"], None))
+        ok = self.call({"op": "edit_note", "id": n["id"], "body": "changed #new", "add_tags": ["extra"], "remove_tags": ["keep"], "pinned": True})["note"]
+        self.assertEqual((ok["body"], sorted(ok["tags"]), ok["pinned"]), ("changed #new", ["extra", "new"], True))
+        self.assertIn("404", self.call({"op": "edit_note", "id": NOTE_B, "pinned": True}, check=False).stderr)
+
+    def test_concurrent_tag_edits_all_land(self):
+        n = j("add", "zq" + os.urandom(3).hex() + " concurrent tags")["note"]["id"]  # odd first word: no first-word filing
+        r = self.race(*[("/v1/notes/update", {"id": n, "add_tags": [f"t{i}"]}) for i in range(5)])
+        self.assertEqual([x[0] for x in r], [200] * 5)
+        self.assertEqual(sorted(j("get", n)["note"]["tags"]), [f"t{i}" for i in range(5)])
+
     def test_search_archived_filter(self):
         w = "arch" + os.urandom(3).hex()
         keep = j("add", f"{w} keep")["note"]
