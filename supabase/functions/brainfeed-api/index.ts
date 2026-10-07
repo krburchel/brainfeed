@@ -1,4 +1,4 @@
-// BrainFeed agent API (v1, revision 7).
+// BrainFeed agent API (v1, revision 8).
 //
 // A deliberately small, fixed set of operations for an agent like Hermes
 // or an iPhone Shortcut: add / search / edit notes (incl. nesting and
@@ -159,7 +159,10 @@ function pickItem(items: Item[], sel: unknown, field: string): Item {
 
 // --------------------------------------------------------- time zones
 async function userTz(userId: string) {
-  const { data } = await db.from('settings').select('timezone').eq('user_id', userId).maybeSingle();
+  // UTC only when the lookup worked and there's no setting. A failed lookup must not
+  // quietly turn "9:00 local" into 9:00 UTC.
+  const { data, error } = await db.from('settings').select('timezone').eq('user_id', userId).maybeSingle();
+  if (error) throw new ApiError(500, 'db_error', 'Could not read time zone setting');
   return data?.timezone || 'UTC';
 }
 // Offset (ms) of a zone at a given instant
@@ -290,7 +293,8 @@ async function handlePhoto(c: Caller, req: Request, url: URL) {
   let created = false;
   if (noteId) {
     uuid(noteId, 'note_id');
-    const { data } = await db.from('notes').select('id,attachments').eq('user_id', c.userId).eq('id', noteId).maybeSingle();
+    const { data, error } = await db.from('notes').select('id,attachments').eq('user_id', c.userId).eq('id', noteId).maybeSingle();
+    if (error) throw new ApiError(500, 'db_error', 'Could not read note');
     if (!data) throw new ApiError(404, 'not_found', 'Note not found');
     if ((data.attachments as unknown[]).length >= 10) throw bad('A note can have at most 10 attachments');
   } else {
@@ -324,12 +328,13 @@ type Handler = (c: Caller, body: Record<string, unknown>) => Promise<unknown>;
 
 const routes: Record<string, Handler> = {
   'GET /v1/status': async (c) => {
-    const [{ count: notes }, { count: open }, tz, { data: u }] = await Promise.all([
+    const [{ count: notes, error: e1 }, { count: open, error: e2 }, tz, { data: u, error: e3 }] = await Promise.all([
       db.from('notes').select('id', { count: 'exact', head: true }).eq('user_id', c.userId),
       db.from('reminders').select('id', { count: 'exact', head: true }).eq('user_id', c.userId).eq('done', false),
       userTz(c.userId),
       db.auth.admin.getUserById(c.userId),
     ]);
+    if (e1 || e2 || e3) throw new ApiError(500, 'db_error', 'Status lookup failed');
     const email = u?.user?.email || '';
     return {
       ok: true, api: 'brainfeed/v1', token: c.tokenName,
@@ -351,11 +356,11 @@ const routes: Record<string, Handler> = {
   },
 
   'POST /v1/notes/search': async (c, b) => {
-    only(b, ['q', 'tags', 'pinned', 'limit', 'before', 'archived', 'parent_id']);
+    only(b, ['q', 'tags', 'pinned', 'limit', 'before', 'before_id', 'archived', 'parent_id']);
     const q = str(b.q, 'q', { max: 200 }) || '';
     const tagList = tags(b.tags, 'tags');
     let query = db.from('notes').select(NOTE_COLS).eq('user_id', c.userId)
-      .order('created_at', { ascending: false }).limit(int(b.limit, 'limit', 20, 1, 50));
+      .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(int(b.limit, 'limit', 20, 1, 50));
     if (tagList.length) query = query.contains('tags', tagList);
     if (bool(b.pinned, 'pinned') !== undefined) query = query.eq('pinned', b.pinned as boolean);
     // archived: true = only archived, false = leave them out; omitted = both.
@@ -363,11 +368,17 @@ const routes: Record<string, Handler> = {
     if (arch === true) query = query.not('archived_at', 'is', null);
     if (arch === false) query = query.is('archived_at', null);
     if (b.parent_id !== undefined) query = query.eq('parent_id', uuid(b.parent_id, 'parent_id'));
+    // Paging: pass the last note's created_at as before and its id as before_id. Ties on
+    // created_at are broken by id, so no note is skipped or repeated across pages.
     if (b.before !== undefined) {
-      const d = new Date(String(b.before));
-      if (isNaN(d.getTime())) throw bad('before must be an ISO date');
-      query = query.lt('created_at', d.toISOString());
-    }
+      // Used exactly as given (a created_at from an earlier result keeps its microseconds).
+      const iso = String(b.before);
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:?\d{2})$/.test(iso) || isNaN(new Date(iso).getTime())) {
+        throw bad('before must be an ISO timestamp with Z or an offset, e.g. a created_at from a result');
+      }
+      if (b.before_id !== undefined) query = query.or(`created_at.lt.${iso},and(created_at.eq.${iso},id.lt.${uuid(b.before_id, 'before_id')})`);
+      else query = query.lt('created_at', iso);
+    } else if (b.before_id !== undefined) throw bad('before_id needs before');
     for (const w of q.split(/\s+/).filter(Boolean).slice(0, 8)) {
       if (/^#[A-Za-z][\w-]*$/.test(w)) query = query.contains('tags', [w.slice(1).toLowerCase()]);
       else query = query.ilike('body', `%${w.replace(/[%_\\]/g, '\\$&')}%`);
@@ -383,15 +394,18 @@ const routes: Record<string, Handler> = {
     if (error) throw new ApiError(500, 'db_error', 'Could not read note');
     if (!data) throw new ApiError(404, 'not_found', 'Note not found');
     const [{ data: kids, error: e1 }, { data: parent, error: e2 }] = await Promise.all([
-      db.from('notes').select('id,body,archived_at').eq('user_id', c.userId).eq('parent_id', data.id).order('created_at').limit(MAX_CHILDREN + 1),
+      db.from('notes').select('id,body,archived_at,created_at').eq('user_id', c.userId).eq('parent_id', data.id)
+        .order('created_at', { ascending: false }).order('id', { ascending: false }).limit(MAX_CHILDREN + 1),
       data.parent_id ? db.from('notes').select('id,body').eq('user_id', c.userId).eq('id', data.parent_id).maybeSingle() : Promise.resolve({ data: null, error: null }),
     ]);
     if (e1 || e2) throw new ApiError(500, 'db_error', 'Could not read nested notes');
     return {
       note: data,
       parent: parent ? { id: parent.id, first_line: firstLine(parent.body as string) } : null,
-      children: (kids || []).slice(0, MAX_CHILDREN).map((k) => ({ id: k.id, first_line: firstLine(k.body as string), archived: !!k.archived_at })),
-      // More than MAX_CHILDREN inside: use search_notes with parent_id (and before) to page.
+      // Newest first, same order as search_notes, so paging continues seamlessly: when
+      // children_truncated, call search_notes with parent_id, before = last child's created_at
+      // and before_id = its id.
+      children: (kids || []).slice(0, MAX_CHILDREN).map((k) => ({ id: k.id, first_line: firstLine(k.body as string), archived: !!k.archived_at, created_at: k.created_at })),
       children_truncated: (kids || []).length > MAX_CHILDREN,
       checklist: checklist(data.body as string).map((x, i) => ({ n: i + 1, done: x.done, text: x.text })),
     };
@@ -435,7 +449,8 @@ const routes: Record<string, Handler> = {
     const { data: rows, error } = await db.rpc('bf_append_note', { p_user: c.userId, p_note: id, p_stamp: stamp, p_text: text });
     if (error) throw new ApiError(500, 'db_error', 'Could not update note');
     if (!rows?.length) throw bad('Note would be too long');
-    const { data } = await db.from('notes').select(NOTE_COLS).eq('user_id', c.userId).eq('id', id).single();
+    const { data, error: e2 } = await db.from('notes').select(NOTE_COLS).eq('user_id', c.userId).eq('id', id).single();
+    if (e2) throw new ApiError(500, 'db_error', 'The entry was added, but the note could not be read back');
     return { note: data, message: 'Added to the note ✓' };
   },
 
@@ -462,10 +477,13 @@ const routes: Record<string, Handler> = {
       const items = checklist(cur.body as string);
       const set = (sel: unknown, field: string, done: boolean, k: number) => {
         const it = pickItem(items, sel, field);
+        // Identity = text plus which copy of that text it is (1st "eggs", 2nd "eggs", ...),
+        // so duplicate items are told apart too.
+        const ident = `${it.text}\u0000${items.filter((x) => x.text === it.text).indexOf(it)}`;
         const key = `${field}:${k}`;
-        if (!firstPick.has(key)) firstPick.set(key, it.text);
-        else if (Number.isInteger(sel) && firstPick.get(key) !== it.text) {
-          throw new ApiError(409, 'conflict', `The checklist changed while saving: item ${sel} is now "${it.text}", not "${firstPick.get(key)}". Nothing was changed; read the note again`);
+        if (!firstPick.has(key)) firstPick.set(key, ident);
+        else if (Number.isInteger(sel) && firstPick.get(key) !== ident) {
+          throw new ApiError(409, 'conflict', `The checklist changed while saving: item ${sel} is no longer the item it was ("${firstPick.get(key)!.split('\u0000')[0]}"). Nothing was changed; read the note again`);
         }
         lines[it.line] = lines[it.line].replace(CHECK_RE, (_m, a, _x, z, t) => a + (done ? 'x' : ' ') + z + t);
         return it.text;
@@ -594,7 +612,8 @@ const routes: Record<string, Handler> = {
     only(b, ['id', 'body', 'due_at', 'due_local', 'dates_local', 'repeat', 'done']);
     const id = uuid(b.id);
     const tz = await userTz(c.userId);
-    const { data: cur } = await db.from('reminders').select('repeat').eq('user_id', c.userId).eq('id', id).maybeSingle();
+    const { data: cur, error: readErr } = await db.from('reminders').select('repeat').eq('user_id', c.userId).eq('id', id).maybeSingle();
+    if (readErr) throw new ApiError(500, 'db_error', 'Could not read reminder');
     if (!cur) throw new ApiError(404, 'not_found', 'Reminder not found');
     const patch: Record<string, unknown> = {};
     const text = str(b.body, 'body', { max: 2000 });
@@ -651,7 +670,8 @@ const routes: Record<string, Handler> = {
 
   'POST /v1/token/revoke': async (c, b) => {
     only(b, []);
-    await db.from('api_tokens').update({ revoked_at: new Date().toISOString() }).eq('id', c.tokenId);
+    const { error } = await db.from('api_tokens').update({ revoked_at: new Date().toISOString() }).eq('id', c.tokenId);
+    if (error) throw new ApiError(500, 'db_error', 'Could not revoke the token');
     return { revoked: true };
   },
 };

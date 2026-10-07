@@ -87,7 +87,8 @@ rebuild and re-import.
 | `api_tokens` | `user_id, name, token_hash (sha256:<64 hex>, unique), created_at, last_used_at, revoked_at`. RLS: owners can see and add their own rows, and may update only `name` / `revoked_at` (column-level grant). They can never change a hash or the owner. |
 | `bf_tag_counts(user)` | Tag → note count for non-archived notes, most-used first (same as the web app's tag list). `service_role` only. |
 | trigger `notes_check_parent` | Nesting rules for every path (web app and API): one level only, same owner, never itself. Every write that sets a parent first takes a per-user transaction advisory lock (`private.nesting_lock`), so competing moves (A into B while B into A, or a child added under A while A moves into B) are checked one at a time and the second is refused. Its messages are passed through to the agent as 400s. |
-| `bf_update_note(user, note, body, pinned, archived, set_parent, parent, add_tags, remove_tags)` | The API's `notes/update` in one transaction: locks the row (`FOR NO KEY UPDATE`, so it can't deadlock with a child insert), applies body / pin / archive, then parent, then tag changes. All or nothing; concurrent tag edits queue on the row lock. `service_role` only. |
+| `bf_update_note(user, note, body, pinned, archived, set_parent, parent, add_tags, remove_tags)` | The API's `notes/update` in one transaction: locks the row (`FOR NO KEY UPDATE`), applies body / pin / archive, then parent, then tag changes. All or nothing; concurrent tag edits queue on the row lock. `service_role` only. |
+| Lock order | Every path is **row → nesting lock**: a parent change (web app UPDATE or `bf_update_note`) holds the note's row lock, and the `notes_check_parent` trigger then takes the per-user advisory lock. Nothing takes the advisory lock first and then waits for a note row in `FOR UPDATE`/`NO KEY UPDATE` mode. A child insert takes the advisory lock and then only a `KEY SHARE` lock on its parent (foreign-key check), which never conflicts with `NO KEY UPDATE`. So web and API moves serialize without deadlocking. |
 | `bf_claim_reminders(user, limit, lease)` | Atomic `UPDATE … FOR UPDATE SKIP LOCKED`: picks due, not-done, unclaimed reminders and stamps a `claim_id` plus a lease (default 5 min). `EXECUTE` is granted to `service_role` only. |
 | `bf_ack_reminders(user, claim_id)` | Marks a claim delivered. One-time → `done = true`. Repeating → `due_at` moves to the next future occurrence. Sets `last_sent_at`. `service_role` only. |
 | `private.next_occurrence(due, repeat, tz)` | Computed in the user's IANA zone and always offset from the original date, so 9:00 stays 9:00 across DST and the 31st stays the 31st (clamped in short months). |
@@ -97,15 +98,16 @@ rebuild and re-import.
 ## API (base `https://bzvibdjrknqvmurwjroq.supabase.co/functions/v1/brainfeed-api`)
 
 All requests need the `X-BrainFeed-Token` header. Bodies are JSON objects, and unknown fields
-are rejected. Errors come back as `{"error": code, "message": text}` with 400 / 401 / 404 / 409 / 413 / 500 / 503.
+are rejected. A database failure is always a 500 `db_error`, never a 404 or a default (for example, if the
+time-zone setting can't be read, nothing is scheduled; UTC is used only when no zone is set). Errors come back as `{"error": code, "message": text}` with 400 / 401 / 404 / 409 / 413 / 500 / 503.
 The helper prints them as `BrainFeed API error <status> (<code>): <message>`.
 
 | Method & path | Body | Returns |
 |---|---|---|
 | `GET /v1/status` | – | `ok, token, account (masked), timezone, now_local, notes, open_reminders` |
 | `POST /v1/notes` | `body` (≤20k), `tags?[]`, `source?` (hermes / telegram / discord / sms / ios), `parent_id?` (save inside that note) | `note` |
-| `POST /v1/notes/search` | `q?` (words AND-ed, `#tag` filters), `tags?[]`, `pinned?`, `limit?` ≤50, `before?` ISO, `archived?` (true = only archived, false = none; omitted = both), `parent_id?` (notes inside that note) | `notes[]` newest first |
-| `POST /v1/notes/get` | `id` | `note`, `parent` (`id`, `first_line`) or null, `children[]` (`id`, `first_line`, `archived`; oldest first, at most 100), `children_truncated` (true when there are more: page with `notes/search` + `parent_id` + `before`), `checklist[]` (`n`, `done`, `text`) |
+| `POST /v1/notes/search` | `q?` (words AND-ed, `#tag` filters), `tags?[]`, `pinned?`, `limit?` ≤50, `before?` (a `created_at` from a result, used exactly), `before_id?` (that note's `id`: with `before`, continues after it, ties broken by id), `archived?` (true = only archived, false = none; omitted = both), `parent_id?` (notes inside that note) | `notes[]` newest first (then by id) |
+| `POST /v1/notes/get` | `id` | `note`, `parent` (`id`, `first_line`) or null, `children[]` (`id`, `first_line`, `archived`, `created_at`; newest first, then by id, at most 100), `children_truncated` (true when there are more: continue with `notes/search` + `parent_id` + `before`/`before_id` of the last child), `checklist[]` (`n`, `done`, `text`) |
 | `POST /v1/notes/update` | `id`, `body?`, `add_tags?[]`, `remove_tags?[]`, `pinned?`, `archived?` (true hides from the feed, false restores), `parent_id?` (note id = move inside, null = take out) | `note` (hashtags re-derived from a new body; manual tags kept). Atomic via `bf_update_note` |
 | `POST /v1/notes/check` | `id`, `check?[]` / `uncheck?[]` (item numbers, or item text: an exact case-insensitive match, else text found in exactly one item), `add?[]` (new items, after the last item, or a new list at the end) | `note`, `checked`, `unchecked`, `added`, `checklist[]`, `message` ("3/5 done"). Errors `no_match` / `ambiguous` (400). Written only if the note is unchanged since it was read (retried, then 409), so concurrent ticks never overwrite each other. On a retry, an item picked **by number** must still have the text it had the first time; if the list was reordered meanwhile, it answers 409 `conflict` and changes nothing. Items picked by text are matched again by text |
 | `POST /v1/tags` | `limit?` ≤500 | `tags[]` (`tag`, `count`), non-archived notes, most-used first |
@@ -192,9 +194,13 @@ late labels, reactivation rules; tag counts (archived excluded); checklist ticks
 number, exact-vs-partial matching, ambiguous/no-match errors, starting a new list, concurrent ticks
 all landing; nesting (add inside, move in/out, children/parent, one-level and cross-account
 refusals, and racing reciprocal moves / child-add-while-moving, which must never break the
-one-level rule); combined edits applied atomically (a refused move leaves the body and tags untouched); the archived search filter; photos (caption + photo, photo-only, attach more, fake
+one-level rule; web-app (signed-in PostgREST) moves racing API moves on the same note, which must never fail
+or deadlock: a smoke test only, since it also passed against the old advisory-then-row order (HTTP
+jitter is far wider than the in-database window), so the lock order itself rests on the rule above); child truncation and keyset paging with `before`/`before_id`; combined edits applied atomically (a refused move leaves the body and tags untouched); the archived search filter; photos (caption + photo, photo-only, attach more, fake
 images rejected before anything is created, bad names, links, size, other users' notes,
 Shortcut-style raw upload, non-image/unknown-parameter/10-per-note limits); request files (shell metacharacters and heredoc delimiters stored
 verbatim, bad names, links, oversized and non-JSON files, disallowed ops, file deleted after use);
 outage alert-once and recover-once; refusal of http:// and loose
-token permissions; and rotation plus revocation. **Never run it against a real account.**
+token permissions; and rotation plus revocation. Not covered (they need a fault- or timing-injection
+hook the production API deliberately doesn't have): the numbered-checklist 409 retry branch and
+injected database read failures. **Never run it against a real account.**

@@ -8,6 +8,11 @@ throwaway accounts, each with a registered token:
     BF_TEST_DIR_B   config dir for test user B (isolation checks)
     BF_TEST_NOTE_B  id of a note that belongs to user B
 
+Optional, for web-app (signed-in) vs API race tests; skipped if unset:
+
+    BF_TEST_A_EMAIL / BF_TEST_A_PASSWORD   test user A's login
+    BF_TEST_ANON_KEY                       the project's publishable key
+
 Never point this at a real account: it creates notes and reminders.
 """
 import json
@@ -589,7 +594,7 @@ class Skill14(unittest.TestCase):
         loose = j("add", "Pikachu hunt")["note"]
         self.call({"op": "edit_note", "id": loose["id"], "parent_id": outer["id"]})
         got = self.call({"op": "get_note", "id": outer["id"]})
-        self.assertEqual([c["id"] for c in got["children"]], [kid["id"], loose["id"]])
+        self.assertEqual([c["id"] for c in got["children"]], [loose["id"], kid["id"]])  # newest first
         self.assertEqual(self.call({"op": "get_note", "id": kid["id"]})["parent"]["id"], outer["id"])
         inside = self.call({"op": "search_notes", "parent_id": outer["id"]})["notes"]
         self.assertEqual({x["id"] for x in inside}, {kid["id"], loose["id"]})
@@ -648,6 +653,62 @@ class Skill14(unittest.TestCase):
         r = self.race(*[("/v1/notes/update", {"id": n, "add_tags": [f"t{i}"]}) for i in range(5)])
         self.assertEqual([x[0] for x in r], [200] * 5)
         self.assertEqual(sorted(j("get", n)["note"]["tags"]), [f"t{i}" for i in range(5)])
+
+    def web_session(self):
+        email, pw, key = (os.environ.get(k) for k in ("BF_TEST_A_EMAIL", "BF_TEST_A_PASSWORD", "BF_TEST_ANON_KEY"))
+        if not (email and pw and key):
+            self.skipTest("BF_TEST_A_EMAIL / BF_TEST_A_PASSWORD / BF_TEST_ANON_KEY not set")
+        root = BASE.split("/functions/")[0]
+        req = urllib.request.Request(root + "/auth/v1/token?grant_type=password", method="POST",
+                                     data=json.dumps({"email": email, "password": pw}).encode(),
+                                     headers={"apikey": key, "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return root, key, json.loads(r.read())["access_token"]
+
+    def test_web_and_api_moves_on_one_note_never_deadlock(self):
+        """Web app (PostgREST UPDATE: row lock, then trigger lock) racing the API (bf_update_note)."""
+        import concurrent.futures, threading
+        root, key, jwt = self.web_session()
+        for _ in range(12):
+            a, p1, p2 = (j("add", f"lock race {x}")["note"]["id"] for x in "abc")
+            gate = threading.Barrier(2)
+            def api():
+                gate.wait()
+                return raw("POST", "/v1/notes/update", {"id": a, "parent_id": p1, "add_tags": ["raced"]}, headers={"X-BrainFeed-Token": TOKEN_A})[0]
+            def web():
+                req = urllib.request.Request(f"{root}/rest/v1/notes?id=eq.{a}", method="PATCH", data=json.dumps({"parent_id": p2}).encode(),
+                                             headers={"apikey": key, "Authorization": "Bearer " + jwt, "Content-Type": "application/json"})
+                gate.wait()
+                try:
+                    with urllib.request.urlopen(req, timeout=20) as r:
+                        return r.status
+                except urllib.error.HTTPError as e:
+                    with e:
+                        return e.code
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                fa, fw = ex.submit(api), ex.submit(web)
+                self.assertEqual((fa.result(), fw.result()), (200, 204))
+            self.assertIn(self.parent_of(a), (p1, p2))
+
+    def test_children_truncated_and_paging(self):
+        import concurrent.futures
+        outer = j("add", "big folder " + os.urandom(3).hex())["note"]["id"]
+        def add(i):
+            return raw("POST", "/v1/notes", {"body": f"child {i}", "parent_id": outer}, headers={"X-BrainFeed-Token": TOKEN_A})[0]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            self.assertEqual(set(ex.map(add, range(105))), {200})
+        got = self.call({"op": "get_note", "id": outer})
+        self.assertEqual(len(got["children"]), 100)
+        self.assertTrue(got["children_truncated"])
+        seen = [c["id"] for c in got["children"]]
+        last = got["children"][-1]
+        rest = self.call({"op": "search_notes", "parent_id": outer, "limit": 50, "before": last["created_at"], "before_id": last["id"]})["notes"]
+        seen += [n["id"] for n in rest]
+        self.assertEqual((len(seen), len(set(seen))), (105, 105))
+        self.assertIn("before_id needs before", self.call({"op": "search_notes", "before_id": last["id"]}, check=False).stderr)
+        small = j("add", "small folder")["note"]["id"]
+        self.call({"op": "add_note", "body": "only child", "parent_id": small})
+        self.assertFalse(self.call({"op": "get_note", "id": small})["children_truncated"])
 
     def test_search_archived_filter(self):
         w = "arch" + os.urandom(3).hex()
