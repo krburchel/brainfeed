@@ -570,6 +570,20 @@ class Skill14(unittest.TestCase):
         self.assertEqual([x["n"] for x in got["checklist"]], [1, 2, 3, 4, 5])
         self.assertIn("404", self.call({"op": "check_items", "id": NOTE_B, "add": ["x"]}, check=False).stderr)
 
+    def test_check_items_stale_numbers_refused(self):
+        # Duplicates swapped between get_note and check_items: the numbers now mean other lines.
+        n = j("add", "- [ ] eggs\n- [x] eggs\n- [ ] milk")["note"]
+        seen = self.call({"op": "get_note", "id": n["id"]})
+        swapped = "- [x] eggs\n- [ ] eggs\n- [ ] milk"
+        self.call({"op": "edit_note", "id": n["id"], "body": swapped})
+        p = self.call({"op": "check_items", "id": n["id"], "uncheck": [2], "updated_at": seen["note"]["updated_at"]}, check=False)
+        self.assertIn("(conflict)", p.stderr)
+        self.assertEqual(j("get", n["id"])["note"]["body"], swapped)  # nothing changed
+        fresh = self.call({"op": "get_note", "id": n["id"]})
+        out = self.call({"op": "check_items", "id": n["id"], "uncheck": [1], "updated_at": fresh["note"]["updated_at"]})
+        self.assertEqual([x["done"] for x in out["checklist"]], [False, False, False])
+        self.assertIn("400", self.call({"op": "check_items", "id": n["id"], "check": [1], "updated_at": 5}, check=False).stderr)
+
     def test_check_items_starts_a_list(self):
         n = j("add", "Packing for the trip")["note"]
         out = self.call({"op": "check_items", "id": n["id"], "add": ["charger", "socks"]})

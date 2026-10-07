@@ -1,4 +1,4 @@
-// BrainFeed agent API (v1, revision 8).
+// BrainFeed agent API (v1, revision 9).
 //
 // A deliberately small, fixed set of operations for an agent like Hermes
 // or an iPhone Shortcut: add / search / edit notes (incl. nesting and
@@ -455,8 +455,14 @@ const routes: Record<string, Handler> = {
   },
 
   'POST /v1/notes/check': async (c, b) => {
-    only(b, ['id', 'check', 'uncheck', 'add']);
+    only(b, ['id', 'check', 'uncheck', 'add', 'updated_at']);
     const id = uuid(b.id);
+    // updated_at (optional): the note's updated_at, verbatim, from the get_note the item
+    // numbers came from. Compared as the exact string (microseconds included): if the note
+    // has changed since, nothing is changed (409).
+    if (b.updated_at !== undefined && (typeof b.updated_at !== 'string' || b.updated_at.length > 40)) {
+      throw bad('updated_at must be the updated_at string from get_note, unchanged');
+    }
     const list = (v: unknown, field: string) => {
       if (v === undefined) return [];
       if (!Array.isArray(v) || !v.length || v.length > 50) throw bad(`${field} must be a list of 1-50 entries`);
@@ -465,31 +471,27 @@ const routes: Record<string, Handler> = {
     const check = list(b.check, 'check'), uncheck = list(b.uncheck, 'uncheck');
     const add = list(b.add, 'add').map((t) => str(t, 'add item', { required: true, max: 500 })!.replace(/\s*\n\s*/g, ' '));
     if (!check.length && !uncheck.length && !add.length) throw bad('Send check, uncheck or add');
-    // Optimistic write: only lands if nobody changed the note since we read it. On a retry,
-    // an item picked by number must still be the same item (same text) it was the first
-    // time; if the list was reordered in between, refuse rather than tick the wrong one.
-    const firstPick = new Map<string, string>();
+    // Optimistic write: only lands if nobody changed the note since we read it. Items picked
+    // by text are matched again on a retry. An item number has no stable meaning once the
+    // note changes (lines can move, and identical lines can swap places), so a request with
+    // any number is never retried: it answers 409 and changes nothing.
+    const numeric = [...check, ...uncheck].some((x) => Number.isInteger(x));
     for (let attempt = 0; attempt < 4; attempt++) {
       const { data: cur, error: readErr } = await db.from('notes').select('body,updated_at').eq('user_id', c.userId).eq('id', id).maybeSingle();
       if (readErr) throw new ApiError(500, 'db_error', 'Could not read note');
       if (!cur) throw new ApiError(404, 'not_found', 'Note not found');
+      if (b.updated_at !== undefined && b.updated_at !== cur.updated_at) {
+        throw new ApiError(409, 'conflict', 'The note changed since you read it, so item numbers may point at different items. Nothing was changed; read the note again');
+      }
       const lines = (cur.body as string).split('\n');
       const items = checklist(cur.body as string);
-      const set = (sel: unknown, field: string, done: boolean, k: number) => {
+      const set = (sel: unknown, field: string, done: boolean) => {
         const it = pickItem(items, sel, field);
-        // Identity = text plus which copy of that text it is (1st "eggs", 2nd "eggs", ...),
-        // so duplicate items are told apart too.
-        const ident = `${it.text}\u0000${items.filter((x) => x.text === it.text).indexOf(it)}`;
-        const key = `${field}:${k}`;
-        if (!firstPick.has(key)) firstPick.set(key, ident);
-        else if (Number.isInteger(sel) && firstPick.get(key) !== ident) {
-          throw new ApiError(409, 'conflict', `The checklist changed while saving: item ${sel} is no longer the item it was ("${firstPick.get(key)!.split('\u0000')[0]}"). Nothing was changed; read the note again`);
-        }
         lines[it.line] = lines[it.line].replace(CHECK_RE, (_m, a, _x, z, t) => a + (done ? 'x' : ' ') + z + t);
         return it.text;
       };
-      const checked = check.map((x, k) => set(x, 'check', true, k));
-      const unchecked = uncheck.map((x, k) => set(x, 'uncheck', false, k));
+      const checked = check.map((x) => set(x, 'check', true));
+      const unchecked = uncheck.map((x) => set(x, 'uncheck', false));
       if (add.length) {
         const at = items.length ? items[items.length - 1].line + 1 : lines.length;
         const fresh = add.map((t) => '- [ ] ' + t);
@@ -508,6 +510,9 @@ const routes: Record<string, Handler> = {
           checklist: now.map((x, i) => ({ n: i + 1, done: x.done, text: x.text })),
           message: `${now.filter((x) => x.done).length}/${now.length} done`,
         };
+      }
+      if (numeric) {
+        throw new ApiError(409, 'conflict', 'The note changed while saving, so item numbers may now point at different items. Nothing was changed; read the note again');
       }
     }
     throw new ApiError(409, 'conflict', 'The note kept changing; try again');

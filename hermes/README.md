@@ -98,8 +98,11 @@ rebuild and re-import.
 ## API (base `https://bzvibdjrknqvmurwjroq.supabase.co/functions/v1/brainfeed-api`)
 
 All requests need the `X-BrainFeed-Token` header. Bodies are JSON objects, and unknown fields
-are rejected. A database failure is always a 500 `db_error`, never a 404 or a default (for example, if the
-time-zone setting can't be read, nothing is scheduled; UTC is used only when no zone is set). Errors come back as `{"error": code, "message": text}` with 400 / 401 / 404 / 409 / 413 / 500 / 503.
+are rejected. A failed database read or write is reported as an error, never as a 404 or a default: a 500
+`db_error`, except the token lookup, which answers 503 `unavailable` (for example, if the time-zone setting
+can't be read, nothing is scheduled; UTC is used only when no zone is set). The one exception is the
+best-effort `last_used_at` stamp on the token, whose failure is ignored so it can't block a request. Errors come
+back as `{"error": code, "message": text}` with 400 / 401 / 404 / 409 / 413 / 415 (photo isn't JPEG/PNG/GIF/WebP) / 500 / 503.
 The helper prints them as `BrainFeed API error <status> (<code>): <message>`.
 
 | Method & path | Body | Returns |
@@ -109,7 +112,7 @@ The helper prints them as `BrainFeed API error <status> (<code>): <message>`.
 | `POST /v1/notes/search` | `q?` (words AND-ed, `#tag` filters), `tags?[]`, `pinned?`, `limit?` ≤50, `before?` (a `created_at` from a result, used exactly), `before_id?` (that note's `id`: with `before`, continues after it, ties broken by id), `archived?` (true = only archived, false = none; omitted = both), `parent_id?` (notes inside that note) | `notes[]` newest first (then by id) |
 | `POST /v1/notes/get` | `id` | `note`, `parent` (`id`, `first_line`) or null, `children[]` (`id`, `first_line`, `archived`, `created_at`; newest first, then by id, at most 100), `children_truncated` (true when there are more: continue with `notes/search` + `parent_id` + `before`/`before_id` of the last child), `checklist[]` (`n`, `done`, `text`) |
 | `POST /v1/notes/update` | `id`, `body?`, `add_tags?[]`, `remove_tags?[]`, `pinned?`, `archived?` (true hides from the feed, false restores), `parent_id?` (note id = move inside, null = take out) | `note` (hashtags re-derived from a new body; manual tags kept). Atomic via `bf_update_note` |
-| `POST /v1/notes/check` | `id`, `check?[]` / `uncheck?[]` (item numbers, or item text: an exact case-insensitive match, else text found in exactly one item), `add?[]` (new items, after the last item, or a new list at the end) | `note`, `checked`, `unchecked`, `added`, `checklist[]`, `message` ("3/5 done"). Errors `no_match` / `ambiguous` (400). Written only if the note is unchanged since it was read (retried, then 409), so concurrent ticks never overwrite each other. On a retry, an item picked **by number** must still have the text it had the first time; if the list was reordered meanwhile, it answers 409 `conflict` and changes nothing. Items picked by text are matched again by text |
+| `POST /v1/notes/check` | `id`, `check?[]` / `uncheck?[]` (item numbers, or item text: an exact case-insensitive match, else text found in exactly one item), `add?[]` (new items, after the last item, or a new list at the end), `updated_at?` (the note's `updated_at` from the `get_note` the numbers came from, verbatim; if the note changed since, 409 `conflict` and nothing changes) | `note`, `checked`, `unchecked`, `added`, `checklist[]`, `message` ("3/5 done"). Errors `no_match` / `ambiguous` (400). Written only if the note is unchanged since it was read, so concurrent ticks never overwrite each other. If the note changed in between: a request that picks **any item by number** is never retried (numbers have no stable meaning once lines move, and identical lines can swap) and answers 409 `conflict` with nothing changed; a request that picks only by text is matched again by text and retried (up to 4 tries, then 409) |
 | `POST /v1/tags` | `limit?` ≤500 | `tags[]` (`tag`, `count`), non-archived notes, most-used first |
 | `POST /v1/notes/append` | `id`, `body` | `note` with `\n\n— Oct 4, 8:30 PM\n<body>` added (stamp in the user's zone, built server-side). A single database UPDATE (`bf_append_note`), so concurrent appends never overwrite each other |
 | `POST /v1/calendar` | `from_local?` (`YYYY-MM-DD`, default today), `days?` 1–31 (default 7) | `overdue_before[]` (open reminders due before the range) and `days[]`: `date`, `weekday`, `reminders[]` (`time_local`, `repeat`, `status`: scheduled / overdue / repeat / done) and `notes[]` (non-archived, `first_line`). Repeats expanded with the same wall-clock, anchored, month-end-clamped rules as delivery |
@@ -202,5 +205,7 @@ Shortcut-style raw upload, non-image/unknown-parameter/10-per-note limits); requ
 verbatim, bad names, links, oversized and non-JSON files, disallowed ops, file deleted after use);
 outage alert-once and recover-once; refusal of http:// and loose
 token permissions; and rotation plus revocation. Not covered (they need a fault- or timing-injection
-hook the production API deliberately doesn't have): the numbered-checklist 409 retry branch and
+hook the production API deliberately doesn't have): the in-request 409 for numbered picks when the note
+changes between the server's own read and write (the `updated_at` precondition path, which covers stale numbers
+from `get_note`, is tested) and
 injected database read failures. **Never run it against a real account.**
