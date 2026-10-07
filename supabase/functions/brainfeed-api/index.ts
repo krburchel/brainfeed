@@ -1,4 +1,4 @@
-// BrainFeed agent API (v1, revision 9).
+// BrainFeed agent API (v1, revision 10).
 //
 // A deliberately small, fixed set of operations for an agent like Hermes
 // or an iPhone Shortcut: add / search / edit notes (incl. nesting and
@@ -457,10 +457,12 @@ const routes: Record<string, Handler> = {
   'POST /v1/notes/check': async (c, b) => {
     only(b, ['id', 'check', 'uncheck', 'add', 'updated_at']);
     const id = uuid(b.id);
-    // updated_at (optional): the note's updated_at, verbatim, from the get_note the item
-    // numbers came from. Compared as the exact string (microseconds included): if the note
-    // has changed since, nothing is changed (409).
-    if (b.updated_at !== undefined && (typeof b.updated_at !== 'string' || b.updated_at.length > 40)) {
+    // updated_at: the note's updated_at, verbatim, from the get_note the item numbers came
+    // from. Required whenever an item number is used (a number only means something for the
+    // version it was read from); optional for text-only and add-only requests. Compared as the
+    // exact string (microseconds included): if the note has changed since, 409, nothing changes.
+    if (b.updated_at !== undefined && (typeof b.updated_at !== 'string'
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:?\d{2})$/.test(b.updated_at))) {
       throw bad('updated_at must be the updated_at string from get_note, unchanged');
     }
     const list = (v: unknown, field: string) => {
@@ -476,6 +478,7 @@ const routes: Record<string, Handler> = {
     // note changes (lines can move, and identical lines can swap places), so a request with
     // any number is never retried: it answers 409 and changes nothing.
     const numeric = [...check, ...uncheck].some((x) => Number.isInteger(x));
+    if (numeric && b.updated_at === undefined) throw bad('updated_at is required when using checklist item numbers');
     for (let attempt = 0; attempt < 4; attempt++) {
       const { data: cur, error: readErr } = await db.from('notes').select('body,updated_at').eq('user_id', c.userId).eq('id', id).maybeSingle();
       if (readErr) throw new ApiError(500, 'db_error', 'Could not read note');

@@ -556,7 +556,8 @@ class Skill14(unittest.TestCase):
 
     def test_check_items(self):
         n = j("add", "# Groceries\n- [ ] Milk\n- [ ] eggs\n- [x] Bread\n- [ ] oat milk\nnotes after")["note"]
-        out = self.call({"op": "check_items", "id": n["id"], "check": ["eggs"], "uncheck": [3], "add": ["Coffee"]})
+        ts = lambda: self.call({"op": "get_note", "id": n["id"]})["note"]["updated_at"]
+        out = self.call({"op": "check_items", "id": n["id"], "check": ["eggs"], "uncheck": [3], "add": ["Coffee"], "updated_at": ts()})
         self.assertEqual([(x["text"], x["done"]) for x in out["checklist"]],
                          [("Milk", False), ("eggs", True), ("Bread", False), ("oat milk", False), ("Coffee", False)])
         self.assertTrue(out["note"]["body"].endswith("- [ ] Coffee\nnotes after"))
@@ -565,9 +566,14 @@ class Skill14(unittest.TestCase):
         self.assertEqual(self.call({"op": "check_items", "id": n["id"], "check": ["milk"]})["checked"], ["Milk"])
         self.assertIn("ambiguous", self.call({"op": "check_items", "id": n["id"], "check": ["mil"]}, check=False).stderr)
         self.assertIn("no_match", self.call({"op": "check_items", "id": n["id"], "check": ["kale"]}, check=False).stderr)
-        self.assertIn("no item 9", self.call({"op": "check_items", "id": n["id"], "check": [9]}, check=False).stderr)
+        self.assertIn("no item 9", self.call({"op": "check_items", "id": n["id"], "check": [9], "updated_at": ts()}, check=False).stderr)
+        # numbers need updated_at; malformed timestamps are a 400, not a 409
+        self.assertIn("updated_at is required", self.call({"op": "check_items", "id": n["id"], "uncheck": [1]}, check=False).stderr)
+        self.assertIn("400", self.call({"op": "check_items", "id": n["id"], "check": [1], "updated_at": "banana"}, check=False).stderr)
+        # text-only and add-only requests don't need it
+        self.call({"op": "check_items", "id": n["id"], "add": ["Tea"]})
         got = self.call({"op": "get_note", "id": n["id"]})
-        self.assertEqual([x["n"] for x in got["checklist"]], [1, 2, 3, 4, 5])
+        self.assertEqual([x["n"] for x in got["checklist"]], [1, 2, 3, 4, 5, 6])  # "Tea" was added above
         self.assertIn("404", self.call({"op": "check_items", "id": NOTE_B, "add": ["x"]}, check=False).stderr)
 
     def test_check_items_stale_numbers_refused(self):
@@ -583,6 +589,12 @@ class Skill14(unittest.TestCase):
         out = self.call({"op": "check_items", "id": n["id"], "uncheck": [1], "updated_at": fresh["note"]["updated_at"]})
         self.assertEqual([x["done"] for x in out["checklist"]], [False, False, False])
         self.assertIn("400", self.call({"op": "check_items", "id": n["id"], "check": [1], "updated_at": 5}, check=False).stderr)
+
+    def test_exact_duplicate_text_is_ambiguous(self):
+        n = j("add", "- [ ] eggs\n- [ ] eggs\n- [ ] Eggs\n- [ ] milk")["note"]
+        p = self.call({"op": "check_items", "id": n["id"], "check": ["eggs"]}, check=False)
+        self.assertIn("(ambiguous)", p.stderr)
+        self.assertEqual(j("get", n["id"])["note"]["body"], "- [ ] eggs\n- [ ] eggs\n- [ ] Eggs\n- [ ] milk")
 
     def test_check_items_starts_a_list(self):
         n = j("add", "Packing for the trip")["note"]
