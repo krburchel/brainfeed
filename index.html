@@ -60,6 +60,30 @@ button { cursor: pointer; }
 a { color: var(--accent); }
 .hidden { display: none !important; }
 
+/* ---------- Review mode ---------- */
+.review .scopes { display: grid; gap: 8px; margin-top: 12px; }
+.review .scopes button { display: flex; align-items: center; gap: 10px; text-align: left; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 12px; padding: 12px 14px; font: inherit; cursor: pointer; }
+.review .scopes button:hover { border-color: var(--accent); }
+.review .scopes button:disabled { opacity: .5; cursor: default; border-color: var(--border); }
+.review .scopes .n { margin-left: auto; color: var(--muted); font-size: 13px; }
+.review-progress { height: 4px; border-radius: 4px; background: var(--surface-2); overflow: hidden; margin: 10px 0 14px; }
+.review-progress span { display: block; height: 100%; background: var(--accent); transition: width .2s; }
+.review-card { border: 1px solid var(--border); border-radius: 14px; padding: 16px; background: var(--surface); min-height: 140px; max-height: 46vh; overflow-y: auto; touch-action: pan-y; transition: transform .18s, opacity .18s; user-select: none; }
+.review-card .note-body { pointer-events: none; }
+.review-card.gone-left { transform: translateX(-110%) rotate(-6deg); opacity: 0; }
+.review-card.gone-right { transform: translateX(110%) rotate(6deg); opacity: 0; }
+.review-meta { font-size: 12px; color: var(--muted); margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+.review-actions { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 14px; }
+.review-actions button { display: grid; justify-items: center; gap: 2px; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 12px; padding: 10px 4px; font: inherit; font-size: 13px; cursor: pointer; }
+.review-actions button:hover { background: var(--surface-2); }
+.review-actions button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.review-actions kbd { font: 11px ui-monospace, monospace; color: inherit; opacity: .6; }
+.review-when { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.review-foot { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; color: var(--muted); }
+.review-foot .spacer { flex: 1; }
+.review-swipe { display: none; }
+@media (hover: none) { .review-actions kbd, .review-keys { display: none; } .review-swipe { display: inline; } }
+
 /* ---------- Tag suggestions ---------- */
 .tag-ac { position: fixed; z-index: 45; min-width: 180px; max-width: min(300px, calc(100vw - 32px)); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 4px; }
 .tag-ac button { display: flex; width: 100%; align-items: center; gap: 8px; border: 0; background: none; color: var(--text); font: inherit; font-size: 14px; text-align: left; padding: 7px 10px; border-radius: 7px; cursor: pointer; }
@@ -452,6 +476,7 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
           <div class="who" id="who"></div>
           <button data-action="theme">Theme: <span id="theme-label">Auto</span></button>
           <button data-action="tagbar">Tag bar: <span id="tagbar-label">Full</span></button>
+          <button data-action="review">Review notes</button>
           <button data-action="notify">Enable reminder alerts</button>
           <button data-action="settings">Settings &amp; connected agents</button>
           <button data-action="export">Export all notes (JSON)</button>
@@ -1322,6 +1347,7 @@ function renderTags() {
   html += `<button class="tag-item${state.pinned ? ' active' : ''}" data-filter="pinned"><span>Pinned</span></button>`;
   html += `<button class="tag-item${state.todo ? ' active' : ''}" data-filter="todo"><span>To-do</span></button>`;
   html += `<button class="tag-item${state.archived ? ' active' : ''}" data-filter="archived"><span>Archived</span>${state.archivedCount ? `<span class="n">${state.archivedCount}</span>` : ''}</button>`;
+  html += `<button class="tag-item" data-review><span>Review…</span></button>`;
   for (const t of tagBarMode() === 'full' ? state.tags : []) {
     html += `<button class="tag-item${state.tag === t.tag ? ' active' : ''}" data-tag="${esc(t.tag)}"><span>#${esc(t.tag)}</span><span class="n">${t.count}</span></button>`;
   }
@@ -1594,6 +1620,7 @@ async function submitCompose() {
 // Note actions (event delegation)
 // ------------------------------------------------------------------
 document.addEventListener('click', async (e) => {
+  if (e.target.closest('[data-review]')) { openReview(); return; }
   const tagBtn = e.target.closest('[data-tag]');
   if (tagBtn && !e.target.closest('.board-picker')) { setFilter({ tag: tagBtn.dataset.tag }); return; }
   const f = e.target.closest('[data-filter]');
@@ -1644,6 +1671,186 @@ document.addEventListener('click', async (e) => {
     deleteNote(note);
   }
 });
+
+// ------------------------------------------------------------------
+// Review mode: go through notes one at a time (oldest-reviewed first) and
+// Keep, Pin, Archive or set a reminder. reviewed_at is stored on the note, so
+// a note reviewed on one device doesn't come up again on another for a week.
+// ------------------------------------------------------------------
+const REVIEW_AGAIN_DAYS = 7;
+const REVIEW_MAX = 50;
+function reviewQuery(scope, count = false) {
+  const since = new Date(Date.now() - REVIEW_AGAIN_DAYS * 864e5).toISOString();
+  let q = sb.from('notes').select(count ? 'id' : '*', count ? { count: 'exact', head: true } : undefined)
+    .is('archived_at', null).or(`reviewed_at.is.null,reviewed_at.lt.${since}`);
+  if (scope.tag) q = q.contains('tags', [scope.tag]);
+  if (scope.todo) q = q.or('tags.cs.{todo},body.like.*[ ]*');
+  if (!count) q = q.order('reviewed_at', { ascending: true, nullsFirst: true }).order('created_at', { ascending: true }).limit(REVIEW_MAX);
+  return q;
+}
+
+async function openReview() {
+  $('#menu').classList.add('hidden');
+  const scopes = [
+    { key: 'idea', label: '💡 Ideas', sub: '#idea', tag: 'idea' },
+    { key: 'todo', label: '✅ To-dos', sub: '#todo and open checklists', todo: true },
+    ...(state.tag && !['idea', 'todo'].includes(state.tag) ? [{ key: 't', label: '#' + state.tag, sub: 'the tag you\'re viewing', tag: state.tag }] : []),
+    { key: 'all', label: '🗂️ Everything', sub: 'all notes, oldest first' },
+  ];
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML = `<div class="modal review" role="dialog" aria-label="Review notes"><div id="rv"></div></div>`;
+  document.body.appendChild(back);
+  const box = back.querySelector('#rv');
+  let queue = [], i = 0, history = [], tally = { kept: 0, pinned: 0, archived: 0, reminded: 0 }, picking = false;
+
+  const close = () => { back.remove(); document.removeEventListener('keydown', onKey, true); if (history.length) { loadNotes(true); scheduleTagRefresh(); } };
+  back.addEventListener('click', (e) => { if (e.target === back) close(); });
+
+  // Step 1: choose what to review (with counts)
+  box.innerHTML = `<h2>Review notes<span class="spacer"></span><button class="tool" data-rv="close" aria-label="Close">✕</button></h2>
+    <p class="help">One note at a time: keep it, pin it, archive it or set a reminder. Notes you review won't come up again for ${REVIEW_AGAIN_DAYS} days.</p>
+    <div class="scopes">${scopes.map((sc) => `<button data-scope="${sc.key}" disabled><span><strong>${esc(sc.label)}</strong><br><span style="font-size:12px;color:var(--muted)">${esc(sc.sub)}</span></span><span class="n" data-count="${sc.key}">…</span></button>`).join('')}</div>`;
+  scopes.forEach(async (sc) => {
+    const { count, error } = await reviewQuery(sc, true);
+    const el = box.querySelector(`[data-count="${sc.key}"]`), btn = box.querySelector(`[data-scope="${sc.key}"]`);
+    if (!el) return;
+    el.textContent = error ? '–' : count ? `${count} to review` : 'all caught up';
+    btn.disabled = !!error || !count;
+  });
+
+  async function start(sc) {
+    box.innerHTML = '<p class="help">Loading…</p>';
+    const { data, error } = await reviewQuery(sc);
+    if (error) { box.innerHTML = `<p class="help">Couldn't load notes: ${esc(error.message)}</p>`; return; }
+    queue = data; i = 0; draw();
+  }
+
+  function draw() {
+    picking = false;
+    if (i >= queue.length) return finish();
+    const n = queue[i];
+    const age = Math.max(0, Math.round((Date.now() - new Date(n.created_at)) / 864e5));
+    box.innerHTML = `<h2>Review<span class="spacer"></span><span style="font-size:13px;color:var(--muted);font-weight:400;margin-right:8px">${i + 1} of ${queue.length}</span><button class="tool" data-rv="close" aria-label="Close">✕</button></h2>
+      <div class="review-progress"><span style="width:${(i / queue.length) * 100}%"></span></div>
+      <div class="review-card" id="rv-card"><div class="note-body">${renderBody(n.body)}</div>
+        <div class="review-meta"><span>${age === 0 ? 'Added today' : age === 1 ? 'Added yesterday' : `Added ${age} days ago`}</span>${n.pinned ? '<span>📌 Pinned</span>' : ''}${n.reviewed_at ? `<span>Last reviewed ${dayLabel(n.reviewed_at)}</span>` : ''}</div></div>
+      <div id="rv-when" class="review-when hidden">
+        <button class="chip" data-when="tonight">Tonight 8pm</button><button class="chip" data-when="tomorrow">Tomorrow 9am</button>
+        <button class="chip" data-when="monday">Monday 9am</button><button class="chip" data-when="week">In a week</button>
+        <input class="field" type="datetime-local" id="rv-at" style="flex:1;min-width:180px"><button class="btn small" data-when="pick">Set</button>
+      </div>
+      <div class="review-actions">
+        <button data-rv="archive">🗄️<span>Archive</span><kbd>A / ←</kbd></button>
+        <button data-rv="remind">⏰<span>Remind me</span><kbd>R</kbd></button>
+        <button data-rv="pin">📌<span>${n.pinned ? 'Unpin' : 'Pin'}</span><kbd>P</kbd></button>
+        <button data-rv="keep" class="primary">👍<span>Keep</span><kbd>K / →</kbd></button>
+      </div>
+      <div class="review-foot"><button class="btn ghost small" data-rv="undo" ${history.length ? '' : 'disabled'}>Undo</button><span class="review-keys">U undo · Esc done</span><span class="review-swipe">Swipe ← archive · → keep</span><span class="spacer"></span><button class="btn ghost small" data-rv="close">Done</button></div>`;
+    swipe(box.querySelector('#rv-card'));
+  }
+
+  function finish() {
+    const t = tally, total = t.kept + t.pinned + t.archived + t.reminded;
+    box.innerHTML = `<h2>${total ? 'Nice work 🎉' : 'All caught up'}<span class="spacer"></span><button class="tool" data-rv="close" aria-label="Close">✕</button></h2>
+      <p class="help">${total ? `Reviewed ${total} note${total > 1 ? 's' : ''}: ${[t.kept && `${t.kept} kept`, t.pinned && `${t.pinned} pinned`, t.archived && `${t.archived} archived`, t.reminded && `${t.reminded} with a reminder`].filter(Boolean).join(', ')}.` : 'Nothing left to review here.'}</p>
+      <div class="row" style="justify-content:flex-end;margin-top:12px">${history.length ? '<button class="btn ghost small" data-rv="undo">Undo last</button>' : ''}<button class="btn small" data-rv="close">Done</button></div>`;
+  }
+
+  // Each action saves, remembers how to undo, then moves on.
+  async function act(kind, extra) {
+    const n = queue[i]; if (!n) return;
+    const prev = { reviewed_at: n.reviewed_at, pinned: n.pinned, archived_at: n.archived_at };
+    const now = new Date().toISOString();
+    const patch = { reviewed_at: now };
+    if (kind === 'pin') patch.pinned = !n.pinned;
+    if (kind === 'archive') patch.archived_at = now;
+    let reminderId = null;
+    if (kind === 'remind') {
+      const body = (firstLine(n.body).replace(/(^|\s)#[A-Za-z][\w-]*/g, '').trim() || 'Review this note').slice(0, 2000);
+      const { data, error } = await sb.from('reminders').insert({ body, due_at: extra.toISOString() }).select('id').single();
+      if (error) { toast('Couldn\'t set the reminder: ' + error.message); return; }
+      reminderId = data.id;
+    }
+    const { error } = await sb.from('notes').update(patch).eq('id', n.id);
+    if (error) {
+      if (reminderId) await sb.from('reminders').delete().eq('id', reminderId);
+      toast('Couldn\'t save: ' + error.message); return;
+    }
+    Object.assign(n, patch);
+    const key = { keep: 'kept', pin: 'pinned', archive: 'archived', remind: 'reminded' }[kind];
+    tally[key]++;
+    history.push({ note: n, prev, key, reminderId, index: i });
+    if (kind === 'remind') { toast('Reminder set for ' + whenLabel(extra)); loadReminders(); }
+    const card = box.querySelector('#rv-card');
+    if (card) card.classList.add(kind === 'archive' ? 'gone-left' : 'gone-right');
+    setTimeout(() => { i++; draw(); }, card ? 160 : 0);
+  }
+
+  async function undo() {
+    const h = history.pop(); if (!h) return;
+    const { error } = await sb.from('notes').update(h.prev).eq('id', h.note.id);
+    if (error) { history.push(h); toast('Couldn\'t undo: ' + error.message); return; }
+    if (h.reminderId) { await sb.from('reminders').delete().eq('id', h.reminderId); loadReminders(); }
+    Object.assign(h.note, h.prev);
+    tally[h.key]--;
+    i = h.index; draw();
+  }
+
+  function remindAt(k) {
+    const d = new Date();
+    if (k === 'tonight') { d.setHours(20, 0, 0, 0); if (d < new Date()) d.setDate(d.getDate() + 1); }
+    else if (k === 'tomorrow') { d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0); }
+    else if (k === 'monday') { d.setDate(d.getDate() + ((8 - d.getDay()) % 7 || 7)); d.setHours(9, 0, 0, 0); }
+    else if (k === 'week') { d.setDate(d.getDate() + 7); d.setHours(9, 0, 0, 0); }
+    else if (k === 'pick') { const v = box.querySelector('#rv-at').value; if (!v) { toast('Pick a date and time.'); return null; } return new Date(v); }
+    return d;
+  }
+  function showWhen() {
+    picking = true;
+    const w = box.querySelector('#rv-when'); w.classList.remove('hidden');
+    const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(9, 0, 0, 0);
+    box.querySelector('#rv-at').value = toLocalInput(d);
+  }
+
+  // Swipe on touch screens: left = archive, right = keep.
+  function swipe(card) {
+    let x0 = null, dx = 0;
+    card.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse') return; x0 = e.clientX; dx = 0; card.style.transition = 'none'; });
+    card.addEventListener('pointermove', (e) => { if (x0 === null) return; dx = e.clientX - x0; card.style.transform = `translateX(${dx}px) rotate(${dx / 40}deg)`; });
+    const end = () => {
+      if (x0 === null) return;
+      x0 = null; card.style.transition = ''; card.style.transform = '';
+      if (dx < -90) act('archive'); else if (dx > 90) act('keep');
+    };
+    card.addEventListener('pointerup', end); card.addEventListener('pointercancel', end);
+  }
+
+  box.addEventListener('click', (e) => {
+    const sc = e.target.closest('[data-scope]');
+    if (sc && !sc.disabled) { start(scopes.find((x) => x.key === sc.dataset.scope)); return; }
+    const w = e.target.closest('[data-when]');
+    if (w) { const d = remindAt(w.dataset.when); if (d) act('remind', d); return; }
+    const b = e.target.closest('[data-rv]'); if (!b || b.disabled) return;
+    const k = b.dataset.rv;
+    if (k === 'close') close();
+    else if (k === 'undo') undo();
+    else if (k === 'remind') showWhen();
+    else act(k);
+  });
+  // Keys work only while the review is open and you're not typing in a field.
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); return; }
+    if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!queue.length || i >= queue.length) { if (e.key.toLowerCase() === 'u') undo(); return; }
+    const k = e.key.toLowerCase();
+    const map = { a: 'archive', arrowleft: 'archive', k: 'keep', arrowright: 'keep', p: 'pin' };
+    if (map[k]) { e.preventDefault(); e.stopPropagation(); act(map[k]); }
+    else if (k === 'r') { e.preventDefault(); picking ? act('remind', remindAt('tomorrow')) : showWhen(); }
+    else if (k === 'u') { e.preventDefault(); undo(); }
+  }
+  document.addEventListener('keydown', onKey, true);
+}
 
 async function archiveNote(note, archive, quiet = false) {
   const prev = note.archived_at;
@@ -1828,7 +2035,9 @@ document.addEventListener('click', (e) => { if (!e.target.closest('#menu')) $('#
 $('#menu').addEventListener('click', async (e) => {
   const a = e.target.closest('[data-action]')?.dataset.action; if (!a) return;
   $('#menu').classList.add('hidden');
-  if (a === 'tagbar') {
+  if (a === 'review') {
+    openReview();
+  } else if (a === 'tagbar') {
     const m = TAGBAR_MODES[(TAGBAR_MODES.indexOf(tagBarMode()) + 1) % TAGBAR_MODES.length];
     lsSet(LS.tagbar, m); applyTagBar(); renderTags();
     toast(m === 'hidden' ? 'Tag bar hidden. Search #tag or tap a tag in a note to filter.' : `Tag bar: ${TAGBAR_LABELS[m]}`);
