@@ -207,6 +207,9 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
 }
 .tool:hover { background: var(--surface-2); color: var(--text); }
 .tool.on { background: var(--accent-soft); color: var(--accent); }
+#mic-btn.listening { background: var(--danger, #d33); color: #fff; animation: bf-pulse 1.2s ease-in-out infinite; }
+@keyframes bf-pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--danger, #d33) 25%, transparent); } }
+@media (prefers-reduced-motion: reduce) { #mic-btn.listening { animation: none; } }
 .remind-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 4px 2px; border-top: 1px dashed var(--border); margin-top: 8px; }
 .remind-row .field { width: auto; padding: 6px 10px; font-size: 14px; }
 .chip {
@@ -531,6 +534,9 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
           </button>
           <button class="tool" id="list-btn" title="Add a checklist item (Enter adds the next one)" aria-label="Checklist">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>
+          </button>
+          <button class="tool hidden" id="mic-btn" title="Dictate a note" aria-label="Dictate">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v4"/></svg>
           </button>
           <input type="file" id="file-input" multiple class="hidden" accept="image/*,application/pdf,text/*,.doc,.docx,.xls,.xlsx,.csv,.zip">
           <span class="spacer"></span>
@@ -1476,6 +1482,82 @@ $('#list-btn').onclick = () => {
   autosize();
 };
 if (matchMedia('(hover: none)').matches) $('#compose-hint').classList.add('hidden');
+
+// ------------------------------------------------------------------
+// Dictation: the mic button types what you say into the composer, using the
+// browser's own speech recognition (Chrome sends audio to Google, Safari to
+// Apple). Nothing is recorded or stored; the words are yours to edit before
+// saving. Say "hashtag groceries" for #groceries and "new line" for a line break.
+// ------------------------------------------------------------------
+const Dictation = (() => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const btn = $('#mic-btn');
+  let rec = null, base = '', tail = '', active = false;
+  if (!SR) return { stop() {}, get active() { return false; } };
+  btn.classList.remove('hidden');
+
+  // Spoken commands and tidy-up for one chunk of recognized speech.
+  function clean(text, before) {
+    let t = text
+      .replace(/\b(?:hash ?tag|hash) ([A-Za-z][\w-]*)/gi, (_, w) => '#' + w.toLowerCase())
+      .replace(/\s*\bnew (?:line|paragraph)\b\s*/gi, '\n')
+      .replace(/[ \t]+/g, ' ');
+    const startOfSentence = !before.trim() || /[\n.!?]\s*$/.test(before);
+    if (startOfSentence) t = t.replace(/^\s*([a-z])/, (_, c) => c.toUpperCase());
+    return t.replace(/\n([a-z])/g, (_, c) => '\n' + c.toUpperCase());
+  }
+  function render(finals, interim) {
+    const sep = base && !/\s$/.test(base) ? ' ' : '';
+    const said = clean((finals + ' ' + interim).trim(), base);
+    compose.value = base + (said ? sep + said : '') + tail;
+    const caret = (base + sep + said).length;
+    compose.setSelectionRange(caret, caret);
+    autosize();
+  }
+  function setUi(on) {
+    active = on;
+    btn.classList.toggle('listening', on);
+    btn.title = on ? 'Stop dictating' : 'Dictate a note';
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    compose.placeholder = on ? 'Listening… tap the mic to stop' : (state.remindMode ? 'Remind me to…' : 'What\'s on your mind? Use #tags to file it…');
+  }
+  function start() {
+    const pos = compose.selectionStart ?? compose.value.length;
+    base = compose.value.slice(0, pos); tail = compose.value.slice(pos);
+    rec = new SR();
+    rec.lang = navigator.language || 'en-US';
+    rec.continuous = true; rec.interimResults = true;
+    rec.onresult = (e) => {
+      let finals = '', interim = '';
+      for (let k = 0; k < e.results.length; k++) {
+        const r = e.results[k];
+        if (r.isFinal) finals += r[0].transcript + ' '; else interim += r[0].transcript;
+      }
+      render(finals, interim);
+    };
+    rec.onerror = (e) => {
+      const msg = {
+        'not-allowed': 'Microphone access is blocked. Allow it for this site in your browser settings.',
+        'service-not-allowed': 'Dictation isn\'t available here. On iPhone, tap the 🎤 on the keyboard instead.',
+        'no-speech': 'Didn\'t catch anything. Tap the mic and try again.',
+        'audio-capture': 'No microphone found.',
+        network: 'Dictation needs an internet connection.',
+      }[e.error];
+      if (msg) toast(msg);
+    };
+    rec.onend = () => { setUi(false); rec = null; compose.focus(); };
+    try { rec.start(); setUi(true); compose.focus(); } catch { toast('Couldn\'t start dictation.'); }
+  }
+  // stop(): finish the current phrase. stop(true): cut off now and ignore any late
+  // results (used when the note is being saved, so words can't reappear afterward).
+  function stop(now = false) {
+    if (!rec) return;
+    if (now) { rec.onresult = null; try { rec.abort(); } catch {} setUi(false); rec = null; return; }
+    try { rec.stop(); } catch {}
+  }
+  btn.onclick = () => (active ? stop() : start());
+  return { stop, get active() { return active; } };
+})();
 $('#send-btn').onclick = submitCompose;
 $('#attach-btn').onclick = () => $('#file-input').click();
 $('#file-input').onchange = (e) => { state.files.push(...e.target.files); e.target.value = ''; renderPendingFiles(); };
@@ -1588,6 +1670,7 @@ function setQuick(k) {
 $('#remind-row').addEventListener('click', (e) => { const k = e.target.dataset.quick; if (k) { e.preventDefault(); setQuick(k); } });
 
 async function submitCompose() {
+  Dictation.stop(true);
   const body = compose.value.trim();
   if (!body && !state.files.length) return;
   if (state.remindMode && $('#remind-repeat').value === 'dates') {
