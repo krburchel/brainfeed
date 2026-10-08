@@ -451,6 +451,7 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
         <div class="menu hidden" id="menu">
           <div class="who" id="who"></div>
           <button data-action="theme">Theme: <span id="theme-label">Auto</span></button>
+          <button data-action="tagbar">Tag bar: <span id="tagbar-label">Full</span></button>
           <button data-action="notify">Enable reminder alerts</button>
           <button data-action="settings">Settings &amp; connected agents</button>
           <button data-action="export">Export all notes (JSON)</button>
@@ -536,7 +537,7 @@ const SUPABASE_URL = 'https://bzvibdjrknqvmurwjroq.supabase.co';
 const SUPABASE_KEY = 'sb_publishable__ybJKWB4JLb19YgGdW8LCg_Z4Xu5iSW';
 const PAGE = 50;
 const BUCKET = 'attachments';
-const LS = { queue: 'bf-queue', cache: 'bf-cache', theme: 'bf-theme', alerted: 'bf-alerted', season: 'bf-season', seasonFx: 'bf-season-fx' };
+const LS = { queue: 'bf-queue', cache: 'bf-cache', theme: 'bf-theme', alerted: 'bf-alerted', season: 'bf-season', seasonFx: 'bf-season-fx', tagbar: 'bf-tagbar' };
 
 // A password-reset email link lands here with #...type=recovery; note it before
 // the client reads (and clears) the hash.
@@ -753,6 +754,7 @@ let realtime = null, reminderTimer = null;
 async function startApp() {
   try { navigator.storage?.persist?.(); } catch {}
   $('#auth').classList.add('hidden');
+  applyTagBar();
   $('#app').classList.remove('hidden');
   $('#who').textContent = state.user.email;
 
@@ -1301,13 +1303,26 @@ function renderStatus(loading) {
   el.classList.toggle('hidden', !bits.length);
 }
 
+// Tag bar: "full" (filters + every tag), "filters" (All / Pinned / To-do / Archived only)
+// or "hidden" (no bar; the feed uses the full width). Per device, like the theme.
+const TAGBAR_MODES = ['full', 'filters', 'hidden'];
+const TAGBAR_LABELS = { full: 'Full', filters: 'Filters only', hidden: 'Hidden' };
+function tagBarMode() { const m = lsGet(LS.tagbar, 'full'); return TAGBAR_MODES.includes(m) ? m : 'full'; }
+function applyTagBar() {
+  const show = state.view === 'feed' && tagBarMode() !== 'hidden';
+  $('#aside').classList.toggle('hidden', !show);
+  $('#main').classList.toggle('wide', !show);
+  $('#aside h3').textContent = tagBarMode() === 'filters' ? 'Filters' : 'Tags';
+  const l = $('#tagbar-label'); if (l) l.textContent = TAGBAR_LABELS[tagBarMode()];
+}
+
 function renderTags() {
   const total = state.tags.reduce((a, t) => a + Number(t.count), 0);
   let html = `<button class="tag-item${!state.tag && !state.pinned && !state.archived && !state.todo ? ' active' : ''}" data-filter="all"><span>All notes</span></button>`;
   html += `<button class="tag-item${state.pinned ? ' active' : ''}" data-filter="pinned"><span>Pinned</span></button>`;
   html += `<button class="tag-item${state.todo ? ' active' : ''}" data-filter="todo"><span>To-do</span></button>`;
   html += `<button class="tag-item${state.archived ? ' active' : ''}" data-filter="archived"><span>Archived</span>${state.archivedCount ? `<span class="n">${state.archivedCount}</span>` : ''}</button>`;
-  for (const t of state.tags) {
+  for (const t of tagBarMode() === 'full' ? state.tags : []) {
     html += `<button class="tag-item${state.tag === t.tag ? ' active' : ''}" data-tag="${esc(t.tag)}"><span>#${esc(t.tag)}</span><span class="n">${t.count}</span></button>`;
   }
   $('#tag-list').innerHTML = html;
@@ -1801,8 +1816,7 @@ function switchView(v) {
   $('#view-board').classList.toggle('hidden', v !== 'board');
   $('#view-reminders').classList.toggle('hidden', v !== 'reminders');
   $('#view-calendar').classList.toggle('hidden', v !== 'calendar');
-  $('#aside').classList.toggle('hidden', v !== 'feed');
-  $('#main').classList.toggle('wide', v !== 'feed');
+  applyTagBar();
   if (v === 'board') loadBoard();
   if (v === 'reminders') renderReminders();
   if (v === 'calendar') { renderCalendar(); loadCalendarNotes(); }
@@ -1814,7 +1828,11 @@ document.addEventListener('click', (e) => { if (!e.target.closest('#menu')) $('#
 $('#menu').addEventListener('click', async (e) => {
   const a = e.target.closest('[data-action]')?.dataset.action; if (!a) return;
   $('#menu').classList.add('hidden');
-  if (a === 'theme') {
+  if (a === 'tagbar') {
+    const m = TAGBAR_MODES[(TAGBAR_MODES.indexOf(tagBarMode()) + 1) % TAGBAR_MODES.length];
+    lsSet(LS.tagbar, m); applyTagBar(); renderTags();
+    toast(m === 'hidden' ? 'Tag bar hidden. Search #tag or tap a tag in a note to filter.' : `Tag bar: ${TAGBAR_LABELS[m]}`);
+  } else if (a === 'theme') {
     const order = ['auto', 'light', 'dark'];
     lsSet(LS.theme, order[(order.indexOf(lsGet(LS.theme, 'auto')) + 1) % 3]); applyTheme();
   } else if (a === 'signout') {
