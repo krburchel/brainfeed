@@ -480,7 +480,7 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
           <button data-action="theme">Theme: <span id="theme-label">Auto</span></button>
           <button data-action="tagbar">Tag bar: <span id="tagbar-label">Full</span></button>
           <button data-action="review">Review notes</button>
-          <button data-action="notify">Enable reminder alerts</button>
+          <button data-action="notify">Notifications…</button>
           <button data-action="settings">Settings &amp; connected agents</button>
           <button data-action="export">Export all notes (JSON)</button>
           <button data-action="signout">Sign out</button>
@@ -568,7 +568,7 @@ const SUPABASE_URL = 'https://bzvibdjrknqvmurwjroq.supabase.co';
 const SUPABASE_KEY = 'sb_publishable__ybJKWB4JLb19YgGdW8LCg_Z4Xu5iSW';
 const PAGE = 50;
 const BUCKET = 'attachments';
-const LS = { queue: 'bf-queue', cache: 'bf-cache', theme: 'bf-theme', alerted: 'bf-alerted', season: 'bf-season', seasonFx: 'bf-season-fx', tagbar: 'bf-tagbar' };
+const LS = { queue: 'bf-queue', cache: 'bf-cache', theme: 'bf-theme', alerted: 'bf-alerted', season: 'bf-season', seasonFx: 'bf-season-fx', tagbar: 'bf-tagbar', pushOn: 'bf-push-on' };
 
 // A password-reset email link lands here with #...type=recovery; note it before
 // the client reads (and clears) the hash.
@@ -2134,9 +2134,7 @@ $('#menu').addEventListener('click', async (e) => {
   } else if (a === 'export') {
     exportNotes();
   } else if (a === 'notify') {
-    if (!('Notification' in window)) { toast('This browser doesn\'t support notifications. Hermes will cover reminders in step 2.'); return; }
-    const p = await Notification.requestPermission();
-    toast(p === 'granted' ? 'Alerts on: you\'ll be notified while BrainFeed is open.' : 'Notifications were blocked.');
+    openSettings('push');
   }
 });
 
@@ -2715,7 +2713,7 @@ function checkDueReminders() {
     if (now - new Date(r.due_at) > 12 * 3600e3 || alerted[r.id] === r.due_at) continue;
     alerted[r.id] = r.due_at; changed = true;
     toast('⏰ ' + r.body, 'Open', () => switchView('reminders'), 10000);
-    try { if (Notification?.permission === 'granted') new Notification('BrainFeed reminder', { body: r.body, icon: 'icon-192.png', tag: r.id }); } catch {}
+    try { if (!lsGet(LS.pushOn, false) && Notification?.permission === 'granted') new Notification('BrainFeed reminder', { body: r.body, icon: 'icon-192.png', tag: r.id }); } catch {}
   }
   if (changed) lsSet(LS.alerted, alerted);
   loadReminders();
@@ -2724,7 +2722,77 @@ function checkDueReminders() {
 // ------------------------------------------------------------------
 // Settings: time zone + connected agents (Hermes)
 // ------------------------------------------------------------------
-async function openSettings() {
+// ------------------------------------------------------------------
+// Push notifications on this device (Web Push). The brainfeed-push function sends
+// due reminders to every device saved in push_subscriptions. On iPhone this needs
+// BrainFeed added to the Home Screen and opened from there (iOS 16.4+).
+// ------------------------------------------------------------------
+const VAPID_PUBLIC = 'BOUsYUcq3tG_W4WOxdnQg3lnjPT15AfqY33xzJw2d12NUdrjz1Kck3_Hj32rOJ2QgnZ5iH214gkNgX1dO5O7mQ4';
+const Push = {
+  supported: () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window,
+  isIOS: () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1),
+  standalone: () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true,
+  device() {
+    const ua = navigator.userAgent;
+    const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) || Push.isIOS() ? 'iPad' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : 'Device';
+    const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'browser';
+    return Push.standalone() ? `${os} (home-screen app)` : `${os} · ${br}`;
+  },
+  async current() {
+    if (!Push.supported()) return null;
+    const reg = await navigator.serviceWorker.getRegistration();
+    return reg ? reg.pushManager.getSubscription() : null;
+  },
+  key() {
+    const b = atob(VAPID_PUBLIC.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - VAPID_PUBLIC.length % 4) % 4));
+    return Uint8Array.from(b, (c) => c.charCodeAt(0));
+  },
+  async enable() {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') throw new Error(perm === 'denied' ? 'Notifications are blocked for BrainFeed. Allow them in your browser or iPhone settings, then try again.' : 'Notifications weren\'t allowed.');
+    const reg = await navigator.serviceWorker.ready;
+    const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Push.key() });
+    const j = sub.toJSON();
+    const { error } = await sb.from('push_subscriptions').upsert(
+      { endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, device: Push.device() }, { onConflict: 'endpoint' });
+    if (error) { await sub.unsubscribe().catch(() => {}); throw new Error('Couldn\'t save this device: ' + error.message); }
+    lsSet(LS.pushOn, true);
+    return sub;
+  },
+  async disable() {
+    const sub = await Push.current();
+    if (sub) { await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint); await sub.unsubscribe().catch(() => {}); }
+    lsSet(LS.pushOn, false);
+  },
+  async test() {
+    const sub = await Push.current();
+    const { data, error } = await sb.functions.invoke('brainfeed-push', { body: { test: true, endpoint: sub?.endpoint } });
+    if (error) throw new Error('The test couldn\'t be sent.');
+    return data;
+  },
+};
+
+// The Notifications section of Settings.
+async function renderPushSection(el) {
+  if (!Push.supported() || location.protocol !== 'https:') {
+    el.innerHTML = Push.isIOS() && !Push.standalone()
+      ? '<p class="help">On iPhone, notifications need BrainFeed on your Home Screen: in Safari tap Share → <strong>Add to Home Screen</strong>, then open BrainFeed from that icon and come back here.</p>'
+      : '<p class="help">This browser can\'t receive push notifications. Telegram reminders through Hermes still work.</p>';
+    return;
+  }
+  const sub = await Push.current();
+  const { data: devices } = await sb.from('push_subscriptions').select('endpoint,device,last_ok_at,created_at').order('created_at');
+  const mine = sub && (devices || []).some((d) => d.endpoint === sub.endpoint);
+  lsSet(LS.pushOn, !!mine);
+  const others = (devices || []).filter((d) => !sub || d.endpoint !== sub.endpoint);
+  el.innerHTML = `<p class="help">Get a notification on this device when a reminder is due, even when BrainFeed is closed. Telegram reminders from Hermes keep working too.</p>
+    <div class="row">${mine
+      ? '<span style="align-self:center;font-size:14px">🔔 On for this device</span><span class="spacer" style="flex:1"></span><button class="btn ghost small" data-set="push-test">Send test</button><button class="btn ghost small" data-set="push-off">Turn off</button>'
+      : '<button class="btn small" data-set="push-on">Turn on notifications</button>'}</div>
+    ${others.length ? `<p class="help" style="margin-top:8px">Also on: ${others.map((d) => esc(d.device || 'another device')).join(', ')}</p>` : ''}`;
+}
+
+async function openSettings(focus) {
   await loadAgents();
   const tz = state.settings?.timezone || 'UTC';
   let zones = [];
@@ -2733,6 +2801,8 @@ async function openSettings() {
   back.className = 'modal-back';
   back.innerHTML = `<div class="modal" role="dialog" aria-label="Settings">
     <h2>Settings<span class="spacer"></span><button class="tool" data-set="close" aria-label="Close">✕</button></h2>
+    <h3 id="set-push-h">Notifications</h3>
+    <div id="set-push"><p class="help">Checking…</p></div>
     <h3>Seasonal theme</h3>
     <p class="help">Colors, a header stripe and a little emoji that change on the 1st of each month. Applies on this device.</p>
     <div class="row">
@@ -2760,6 +2830,9 @@ async function openSettings() {
     <div id="agent-list" style="margin-top:12px"></div>
   </div>`;
   document.body.appendChild(back);
+  const pushEl = back.querySelector('#set-push');
+  renderPushSection(pushEl).catch(() => { pushEl.innerHTML = '<p class="help">Couldn\'t check notifications on this device.</p>'; });
+  if (focus === 'push') back.querySelector('#set-push-h').scrollIntoView({ block: 'start' });
   back.querySelector('#set-season').value = lsGet(LS.season, 'auto');
   back.querySelector('#set-fx').checked = lsGet(LS.seasonFx, true);
   back.querySelector('#set-season').addEventListener('change', (e) => { lsSet(LS.season, e.target.value); applyTheme(); renderFeed(); });
@@ -2780,6 +2853,16 @@ async function openSettings() {
     if (e.target === back) { close(); return; }
     const act = e.target.closest('[data-set]')?.dataset.set; if (!act) return;
     if (act === 'close') close();
+    else if (act === 'push-on' || act === 'push-off' || act === 'push-test') {
+      const btn = e.target.closest('button'); btn.disabled = true;
+      try {
+        if (act === 'push-on') { await Push.enable(); toast('Notifications on for this device 🔔'); await Push.test().catch(() => {}); }
+        else if (act === 'push-off') { await Push.disable(); toast('Notifications off for this device'); }
+        else { const r = await Push.test(); toast(r?.sent ? 'Test sent. It should appear in a few seconds.' : (r?.message || 'No notification was delivered.')); }
+      } catch (err) { toast(err.message || 'Something went wrong'); }
+      btn.disabled = false;
+      renderPushSection(pushEl).catch(() => {});
+    }
     else if (act === 'tz') {
       const v = back.querySelector('#set-tz').value.trim();
       try { new Intl.DateTimeFormat('en-US', { timeZone: v }); } catch { toast('That isn\'t a valid time zone'); return; }
@@ -2815,6 +2898,7 @@ async function openSettings() {
 // ------------------------------------------------------------------
 async function handleIncoming() {
   const p = new URLSearchParams(location.search);
+  if (p.get('view') === 'reminders') { history.replaceState(null, '', location.pathname); switchView('reminders'); return; }
   const add = p.get('add');
   const shared = [p.get('title'), p.get('text'), p.get('url')].filter(Boolean);
   const body = (add || [...new Set(shared)].join('\n')).trim();
@@ -2829,6 +2913,10 @@ async function handleIncoming() {
 // ------------------------------------------------------------------
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
+  // A tapped notification focuses an open BrainFeed window and tells it where to go.
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type === 'open' && /[?&]view=reminders/.test(e.data.url || '') && state.user) switchView('reminders');
+  });
 }
 </script>
 </body>

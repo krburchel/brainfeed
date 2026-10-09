@@ -1,6 +1,6 @@
 // Network-first service worker: always try GitHub Pages for the latest
 // version, fall back to the cached copy when offline.
-var CACHE = 'brainfeed-v17';
+var CACHE = 'brainfeed-v18';
 var ASSETS = [
   './',
   './index.html',
@@ -44,4 +44,30 @@ self.addEventListener('fetch', function(e){
       });
     })
   );
+});
+
+// Push notifications (reminders from the brainfeed-push function). The payload is
+// {title, body, tag, url}; tapping opens or focuses BrainFeed at that URL.
+self.addEventListener('push', function(e){
+  var d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (_) { d = { body: e.data ? e.data.text() : '' }; }
+  e.waitUntil(self.registration.showNotification(d.title || 'BrainFeed', {
+    body: d.body || '', tag: d.tag || undefined, icon: 'icon-192.png', badge: 'favicon-32.png',
+    data: { url: d.url || './' }
+  }));
+});
+
+self.addEventListener('notificationclick', function(e){
+  e.notification.close();
+  var url = new URL((e.notification.data && e.notification.data.url) || './', self.registration.scope).href;
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(list){
+    for (var i = 0; i < list.length; i++) {
+      var c = list[i];
+      if (c.url.indexOf(self.registration.scope) === 0 && 'focus' in c) {
+        c.postMessage({ type: 'open', url: url });
+        return c.focus();
+      }
+    }
+    return self.clients.openWindow(url);
+  }));
 });
