@@ -239,7 +239,9 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
 .note-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--muted); }
 .note-meta .spacer { flex: 1; }
 .src { border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; font-size: 11px; text-transform: lowercase; }
-.note-actions { display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
+.note-actions { display: flex; gap: 2px; opacity: .45; transition: opacity .15s; }
+.note-body.folded { max-height: 15.5em; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
+.more-btn { border: 0; background: none; color: var(--accent); font: inherit; font-size: 13px; font-weight: 600; padding: 4px 0; cursor: pointer; }
 .note:hover .note-actions, .note:focus-within .note-actions { opacity: 1; }
 @media (hover: none) { .note-actions { opacity: 1; } }
 .note-actions .tool { width: 28px; height: 28px; }
@@ -582,7 +584,7 @@ const state = {
   appending: null, expanded: new Set(), children: {}, childCounts: {}, parentTitles: {},
   remEditing: null, cal: { month: null, selected: null, notes: [], mode: 'month', moving: null }, dp: {},
   tags: [], settings: null, reminders: [],
-  files: [], remindMode: false, editing: null,
+  files: [], remindMode: false, editing: null, editBase: null, editDraft: null, openBodies: new Set(),
   boardNotes: {}, boardPicking: false, pickTags: [], boardMoving: null,
   agents: [],
 };
@@ -846,7 +848,7 @@ const isMainFeed = () => !state.tag && !state.pinned && !state.archived && !stat
 function matchesFilter(n) {
   // Notes inside another note live under their parent, not in the main feed.
   if (n.parent_id && isMainFeed()) return false;
-  if (state.todo && !OPEN_ITEM_RE.test(n.body)) return false;
+  if (state.todo && !n.tags.includes('todo') && !OPEN_ITEM_RE.test(n.body)) return false;
   // Archived notes only show in the Archived view, or when searching.
   if (state.archived ? !n.archived_at : (n.archived_at && !state.query)) return false;
   if (state.tag && !n.tags.includes(state.tag)) return false;
@@ -857,8 +859,12 @@ function matchesFilter(n) {
   return words.every((w) => b.includes(w.toLowerCase()));
 }
 
+// Each load gets a number; only the newest one may show its results, so a slow
+// earlier search can never replace a newer one. "Load more" waits for the current load.
+let loadSeq = 0;
 async function loadNotes(reset) {
-  if (state.loading) return;
+  if (!reset && state.loading) return;
+  const seq = ++loadSeq;
   state.loading = true;
   if (reset) renderStatus(true);
   const offset = reset ? 0 : state.notes.length;
@@ -867,21 +873,23 @@ async function loadNotes(reset) {
   if (isMainFeed()) q = q.is('parent_id', null);
   if (state.archived) q = q.not('archived_at', 'is', null);
   else if (!state.query) q = q.is('archived_at', null);
-  if (state.todo) q = q.like('body', '%[ ]%');
+  if (state.todo) q = q.or('tags.cs.{todo},body.like.*[ ]*');
   if (state.tag) q = q.contains('tags', [state.tag]);
   if (state.pinned) q = q.eq('pinned', true);
   const { words, tags } = parseQuery(state.query);
   if (tags.length) q = q.contains('tags', tags);
   for (const w of words) q = q.ilike('body', `%${w.replace(/[%_\\]/g, '\\$&')}%`);
   const { data, error } = await q;
+  if (seq !== loadSeq) return; // a newer load replaced this one
   state.loading = false;
   if (error) {
     renderStatus(false, navigator.onLine ? 'Couldn\'t load notes: ' + error.message : null);
     return;
   }
+  await loadNestingInfo(data);
+  if (seq !== loadSeq) return;
   state.notes = reset ? data : state.notes.concat(data);
   state.hasMore = data.length === PAGE;
-  await loadNestingInfo(data);
   if (!state.tag && !state.pinned && !state.archived && !state.todo && !state.query) lsSet(LS.cache, { uid: state.user.id, notes: state.notes.slice(0, PAGE) });
   renderFeed();
 }
@@ -936,6 +944,8 @@ function newId() {
     : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 3 | 8)).toString(16); });
 }
 
+// Returns true when the note is saved (or safely queued offline), false when it wasn't,
+// so the caller can put the draft back.
 async function addNote(body, files = [], source = 'web') {
   const id = newId();
   const created_at = new Date().toISOString();
@@ -943,9 +953,10 @@ async function addNote(body, files = [], source = 'web') {
   if (matchesFilter(optimistic)) { state.notes.unshift(optimistic); renderFeed(); }
 
   if (!navigator.onLine) {
-    if (files.length) toast('Offline: the text was saved, but files need a connection.');
+    // Files can't wait in the offline queue, so a note with files isn't taken while offline.
+    if (files.length) { state.notes = state.notes.filter((n) => n.id !== id); renderFeed(); toast('You\'re offline. Notes with files need a connection.'); return false; }
     queuePush({ id, body, source, created_at });
-    return;
+    return true;
   }
   try {
     const attachments = [];
@@ -954,14 +965,17 @@ async function addNote(body, files = [], source = 'web') {
     if (error) throw error;
     replaceNote(data);
     scheduleTagRefresh();
+    return true;
   } catch (err) {
-    if (!navigator.onLine || /fetch|network/i.test(err.message)) {
+    const network = !navigator.onLine || /fetch|network/i.test(err.message);
+    if (network && !files.length) {
       queuePush({ id, body, source, created_at });
       markQueued(id);
-    } else {
-      state.notes = state.notes.filter((n) => n.id !== id); renderFeed();
-      toast('Couldn\'t save: ' + err.message);
+      return true;
     }
+    state.notes = state.notes.filter((n) => n.id !== id); renderFeed();
+    toast(network ? 'Lost connection while uploading. Your note is back in the box; try again when you\'re online.' : 'Couldn\'t save: ' + err.message + '. Your note is back in the box.');
+    return false;
   }
 }
 
@@ -1251,7 +1265,7 @@ function continueChecklist(ta, e) {
 function noteHtml(n, compact = false, child = false) {
   if (state.editing === n.id) {
     return `<div class="note edit-box" data-id="${n.id}">
-      <textarea class="field" id="edit-text">${esc(n.body)}</textarea>
+      <textarea class="field" id="edit-text">${esc(state.editDraft ?? n.body)}</textarea>
       <div class="row"><button class="btn ghost small" data-act="cancel">Cancel</button><button class="btn small" data-act="save">Save</button></div>
     </div>`;
   }
@@ -1261,7 +1275,13 @@ function noteHtml(n, compact = false, child = false) {
     ? `<img data-path="${esc(a.path)}" alt="${esc(a.name)}" loading="lazy" data-act="zoom">`
     : `<a class="file" data-path="${esc(a.path)}" target="_blank" rel="noopener">${ICON.file}${esc(a.name)}</a>`).join('');
   return `<article class="note${n.pinned ? ' pinned' : ''}${n._queued ? ' queued' : ''}" data-id="${n.id}">
-    <div class="note-body">${highlight(renderBody(n.body))}</div>
+    ${(() => {
+      // Long notes fold to a preview (not while searching, so matches stay visible).
+      const long = !state.query && state.appending !== n.id && (n.body.length > 900 || n.body.split('\n').length > 14);
+      const open = state.openBodies.has(n.id);
+      return `<div class="note-body${long && !open ? ' folded' : ''}">${highlight(renderBody(n.body))}</div>`
+        + (long ? `<button class="more-btn" data-act="more">${open ? 'Show less' : 'Show more'}</button>` : '');
+    })()}
     ${state.appending === n.id ? `<div class="append-box">
       <textarea class="field" data-append placeholder="Add to this note…"></textarea>
       <div class="row"><button class="btn ghost small" data-act="append-cancel">Cancel</button><button class="btn small" data-act="append-save">Add</button></div>
@@ -1327,7 +1347,7 @@ function renderStatus(loading) {
   if (q) bits.push(`${q} note${q > 1 ? 's' : ''} waiting to sync`);
   if (state.tag) bits.push(`Showing <button class="hashtag" data-tag="${esc(state.tag)}">#${esc(state.tag)}</button> <button class="btn ghost small" data-act="clear">Clear</button>`);
   else if (state.pinned) bits.push('Showing pinned notes <button class="btn ghost small" data-act="clear">Clear</button>');
-  else if (state.todo) bits.push('Showing notes with open checklist items <button class="btn ghost small" data-act="clear">Clear</button>');
+  else if (state.todo) bits.push('Showing to-dos: #todo notes and open checklists <button class="btn ghost small" data-act="clear">Clear</button>');
   else if (state.archived) bits.push('Showing archived notes <button class="btn ghost small" data-act="clear">Clear</button>');
   if (state.query && !loading) bits.push(`${state.notes.length}${state.hasMore ? '+' : ''} result${state.notes.length === 1 ? '' : 's'}`);
   el.innerHTML = bits.join(' ');
@@ -1694,9 +1714,17 @@ async function submitCompose() {
     loadReminders();
     return;
   }
+  if (!navigator.onLine && state.files.length) {
+    toast('You\'re offline. Notes with files wait here until you\'re back online (or remove the files to save just the text).');
+    return;
+  }
   const files = state.files; state.files = []; renderPendingFiles();
   compose.value = ''; autosize();
-  await addNote(body, files);
+  if (!(await addNote(body, files))) {
+    // Put the draft back, keeping anything typed since.
+    compose.value = compose.value.trim() ? body + '\n\n' + compose.value : body;
+    state.files = files.concat(state.files); renderPendingFiles(); autosize();
+  }
 }
 
 // ------------------------------------------------------------------
@@ -1728,10 +1756,12 @@ document.addEventListener('click', async (e) => {
   } else if (act === 'remind') {
     compose.value = note.body.replace(/(^|\s)#[A-Za-z][\w-]*/g, '').trim(); autosize();
     setRemindMode(true); window.scrollTo({ top: 0, behavior: 'smooth' });
+  } else if (act === 'more') {
+    state.openBodies.has(id) ? state.openBodies.delete(id) : state.openBodies.add(id); rerender();
   } else if (act === 'edit') {
-    state.editing = id; rerender();
+    state.editing = id; state.editBase = { id, updated_at: note.updated_at }; state.editDraft = null; rerender();
   } else if (act === 'cancel') {
-    state.editing = null; rerender();
+    state.editing = null; state.editDraft = null; state.editBase = null; rerender();
   } else if (act === 'save') {
     await saveEdit(note);
   } else if (act === 'append') {
@@ -1962,20 +1992,58 @@ document.addEventListener('keydown', (e) => {
   if (e.target.id === 'edit-text') {
     if (continueChecklist(e.target, e)) return;
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); const n = findNote(state.editing); if (n) saveEdit(n); }
-    if (e.key === 'Escape') { state.editing = null; rerender(); }
+    if (e.key === 'Escape') { state.editing = null; state.editDraft = null; state.editBase = null; rerender(); }
   }
   if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) { e.preventDefault(); $('#search').focus(); }
 });
 
-async function saveEdit(note) {
-  const body = $('#edit-text').value.trim();
-  state.editing = null;
-  if (!body || body === note.body) { rerender(); return; }
+// Saves only if the note is unchanged since editing began (another device or Hermes may
+// have changed it). On a conflict, nothing is overwritten and you choose what to keep.
+async function saveEdit(note, force = false) {
+  const body = $('#edit-text')?.value.trim() ?? state.editDraft;
+  const base = state.editBase?.id === note.id ? state.editBase.updated_at : note.updated_at;
+  state.editing = null; state.editDraft = null;
+  if (!body || body === note.body) { state.editBase = null; rerender(); return; }
   const old = note.body; note.body = body; note.tags = localTags(body); rerender();
-  const { data, error } = await sb.from('notes').update({ body }).eq('id', note.id).select().single();
-  if (error) { note.body = old; rerender(); toast('Couldn\'t save: ' + error.message); return; }
-  replaceNote(data); scheduleTagRefresh();
+  let q = sb.from('notes').update({ body }).eq('id', note.id);
+  if (!force && base) q = q.eq('updated_at', base);
+  const { data, error } = await q.select();
+  const reopen = () => { note.body = old; note.tags = localTags(old); state.editing = note.id; state.editDraft = body; rerender(); };
+  if (error) { reopen(); toast('Couldn\'t save: ' + error.message + '. Your edit is still open.'); return; }
+  if (!data.length) { reopen(); return editConflict(note, body); }
+  state.editBase = null;
+  replaceNote(data[0]); scheduleTagRefresh();
   if (state.view === 'board') loadBoard();
+}
+
+async function editConflict(note, mine) {
+  const { data: theirs } = await sb.from('notes').select(NOTE_SELECT).eq('id', note.id).maybeSingle();
+  const back = document.createElement('div');
+  back.className = 'modal-back';
+  back.innerHTML = `<div class="modal" role="dialog" aria-label="Edit conflict">
+    <h2>This note changed while you were editing</h2>
+    <p class="help">${theirs ? 'Another device or Hermes saved a newer version. Nothing has been overwritten. Here\'s the newer version:' : 'It was deleted somewhere else.'}</p>
+    ${theirs ? `<pre style="white-space:pre-wrap;max-height:30vh;overflow:auto;background:var(--surface-2);border-radius:10px;padding:10px;font-family:inherit;font-size:13px;line-height:1.45">${esc(theirs.body)}</pre>` : ''}
+    <div class="row" style="justify-content:flex-end;margin-top:12px">
+      <button class="btn ghost small" data-c="edit">Keep editing</button>
+      ${theirs ? '<button class="btn ghost small" data-c="theirs">Use theirs (copy mine)</button>' : '<button class="btn ghost small" data-c="copy">Copy my text</button>'}
+      ${theirs ? '<button class="btn small" data-c="mine">Keep mine</button>' : ''}
+    </div></div>`;
+  document.body.appendChild(back);
+  back.addEventListener('click', async (e) => {
+    const c = e.target.closest('[data-c]')?.dataset.c; if (!c) return;
+    back.remove();
+    if (c === 'mine') { state.editing = null; await saveEdit(note, true); }
+    else if (c === 'theirs' || c === 'copy') {
+      try { await navigator.clipboard.writeText(mine); toast('Your version is copied to the clipboard'); } catch { toast('Couldn\'t copy your version'); }
+      state.editing = null; state.editDraft = null; state.editBase = null;
+      if (theirs) replaceNote(theirs); else { state.notes = state.notes.filter((n) => n.id !== note.id); rerender(); }
+    } else {
+      // Keep editing on top of the newer version: your text stays in the box.
+      if (theirs) { state.editBase = { id: note.id, updated_at: theirs.updated_at }; replaceNote(theirs); }
+      state.editing = note.id; state.editDraft = mine; rerender();
+    }
+  });
 }
 
 async function appendToNote(note, raw) {
