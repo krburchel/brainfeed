@@ -2804,7 +2804,7 @@ async function renderPushSection(el) {
   const mine = sub && (devices || []).some((d) => d.endpoint === sub.endpoint);
   lsSet(LS.pushOn, !!mine);
   const others = (devices || []).filter((d) => !sub || d.endpoint !== sub.endpoint);
-  el.innerHTML = `<p class="help">Get a notification on this device when a reminder is due, even when BrainFeed is closed. Telegram reminders from Hermes keep working too.</p>
+  el.innerHTML = `<p class="help">Get a notification on this device when a reminder is due, even when BrainFeed is closed. Choose below whether Telegram gets them too.</p>
     <div class="row">${mine
       ? '<span style="align-self:center;font-size:14px">🔔 On for this device</span><span class="spacer" style="flex:1"></span><button class="btn ghost small" data-set="push-test">Send test</button><button class="btn ghost small" data-set="push-off">Turn off</button>'
       : '<button class="btn small" data-set="push-on">Turn on notifications</button>'}</div>
