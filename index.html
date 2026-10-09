@@ -1179,13 +1179,34 @@ function withAddFocus(draw) {
   if (el) { el.value = info.value; el.focus(); try { el.setSelectionRange(info.caret, info.caret); } catch {} }
 }
 
-async function setNoteBody(note, body) {
-  const old = note.body;
-  note.body = body; note.tags = localTags(body); rerender();
-  const { data, error } = await sb.from('notes').update({ body }).eq('id', note.id).select().single();
-  if (error) { note.body = old; rerender(); toast('Couldn\'t save: ' + error.message); return false; }
-  replaceNote(data); scheduleTagRefresh();
-  return true;
+// Change a note's text by applying `transform` to its current text. The write only
+// lands if the note is unchanged since it was read; if Hermes or another device changed
+// it meanwhile, the newest copy is fetched and the change re-applied to that, so their
+// edit is never overwritten. transform returns null when the change no longer fits.
+async function updateNoteBody(note, transform) {
+  let cur = note;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const body = transform(cur.body);
+    if (body == null) { toast('This note changed on another device, so that change wasn\'t applied. It\'s been refreshed.'); replaceNote(cur); return false; }
+    const old = { body: note.body, tags: note.tags };
+    Object.assign(note, { body, tags: localTags(body) }); rerender();
+    let q = sb.from('notes').update({ body }).eq('id', note.id);
+    if (cur.updated_at) q = q.eq('updated_at', cur.updated_at);
+    const { data, error } = await q.select();
+    if (error) { Object.assign(note, old); rerender(); toast('Couldn\'t save: ' + error.message); return false; }
+    if (data.length) { replaceNote(data[0]); scheduleTagRefresh(); return true; }
+    const { data: fresh, error: e2 } = await sb.from('notes').select(NOTE_SELECT).eq('id', note.id).maybeSingle();
+    Object.assign(note, old);
+    if (e2 || !fresh) { rerender(); toast(e2 ? 'Couldn\'t save: ' + e2.message : 'This note was deleted on another device.'); if (!e2) loadNotes(true); return false; }
+    cur = fresh; Object.assign(note, fresh);
+  }
+  toast('This note kept changing; try again in a moment.'); return false;
+}
+// The line to change, found again in a possibly newer copy: same position if it still
+// reads the same, otherwise the first line that matches it exactly.
+function findLine(lines, index, text) {
+  if (lines[index] === text) return index;
+  return lines.indexOf(text);
 }
 
 document.addEventListener('change', async (e) => {
@@ -1193,11 +1214,15 @@ document.addEventListener('change', async (e) => {
   if (!cb) return;
   const note = findNote(cb.closest('[data-id]')?.dataset.id);
   if (!note) return;
-  const lines = note.body.split('\n');
-  const i = +cb.dataset.check;
-  if (!CHECK_RE.test(lines[i] || '')) return;
-  lines[i] = lines[i].replace(/\[[ xX]\]/, cb.checked ? '[x]' : '[ ]');
-  if (!(await setNoteBody(note, lines.join('\n')))) return;
+  const i = +cb.dataset.check, line = note.body.split('\n')[i];
+  if (!CHECK_RE.test(line || '')) return;
+  const ok = await updateNoteBody(note, (body) => {
+    const lines = body.split('\n'), k = findLine(lines, i, line);
+    if (k < 0) return null;
+    lines[k] = lines[k].replace(/\[[ xX]\]/, cb.checked ? '[x]' : '[ ]');
+    return lines.join('\n');
+  });
+  if (!ok) return;
   const items = checklistItems(note.body);
   if (cb.checked && items.length && items.every((x) => x.done) && !note.archived_at) {
     toast('All done ✓', 'Archive list', () => archiveNote(note, true), 6000);
@@ -1235,10 +1260,18 @@ document.addEventListener('keydown', async (e) => {
   const id = input.closest('[data-id]').dataset.id;
   const note = findNote(id);
   if (!note) return;
-  const lines = note.body.split('\n');
-  lines.splice(+input.dataset.addAfter + 1, 0, '- [ ] ' + text);
+  const after = +input.dataset.addAfter, anchor = note.body.split('\n')[after];
   input.value = '';
-  await setNoteBody(note, lines.join('\n'));
+  const ok = await updateNoteBody(note, (body) => {
+    const lines = body.split('\n'), k = findLine(lines, after, anchor);
+    lines.splice(k < 0 ? lines.length : k + 1, 0, '- [ ] ' + text);
+    return lines.join('\n');
+  });
+  if (!ok) {
+    // Keep what was typed: put it back in that note's "+ Add item" box.
+    const box = document.querySelector(`[data-id="${id}"] [data-add-after]`);
+    if (box) { box.value = text; box.focus(); }
+  }
 });
 
 // Enter on a checklist line continues the list; Enter on an empty item ends it.
@@ -1283,7 +1316,7 @@ function noteHtml(n, compact = false, child = false) {
         + (long ? `<button class="more-btn" data-act="more">${open ? 'Show less' : 'Show more'}</button>` : '');
     })()}
     ${state.appending === n.id ? `<div class="append-box">
-      <textarea class="field" data-append placeholder="Add to this note…"></textarea>
+      <textarea class="field" data-append placeholder="Add to this note…">${esc(state.appendDraft || '')}</textarea>
       <div class="row"><button class="btn ghost small" data-act="append-cancel">Cancel</button><button class="btn small" data-act="append-save">Add</button></div>
     </div>` : ''}
     ${extra.length ? `<div class="extra-tags">${extra.map((t) => `<button class="hashtag" data-tag="${esc(t)}">#${esc(t)}</button>`).join('')}</div>` : ''}
@@ -1317,7 +1350,14 @@ function noteHtml(n, compact = false, child = false) {
   </article>`;
 }
 
+// While a note is being edited, keep what's typed so a redraw can't wipe it.
+function captureEditDraft() {
+  const et = document.getElementById('edit-text');
+  if (et && state.editing) state.editDraft = et.value;
+}
+
 function renderFeed() {
+  captureEditDraft();
   const feed = $('#feed');
   if (!state.notes.length) {
     const filtered = state.tag || state.pinned || state.todo || state.query;
@@ -1765,7 +1805,7 @@ document.addEventListener('click', async (e) => {
   } else if (act === 'save') {
     await saveEdit(note);
   } else if (act === 'append') {
-    state.appending = state.appending === id ? null : id; state.appendFocus = !!state.appending; rerender();
+    state.appending = state.appending === id ? null : id; state.appendDraft = ''; state.appendFocus = !!state.appending; rerender();
   } else if (act === 'append-cancel') {
     state.appending = null; rerender();
   } else if (act === 'append-save') {
@@ -2056,7 +2096,13 @@ async function appendToNote(note, raw) {
   const old = note.body;
   note.body = note.body.replace(/\s+$/, '') + '\n\n' + stamp + '\n' + text; rerender();
   const { data, error } = await sb.rpc('append_to_note', { p_note: note.id, p_stamp: stamp, p_text: text });
-  if (error || !data?.length) { note.body = old; rerender(); toast('Couldn\'t add: ' + (error?.message || 'note not found')); return; }
+  if (error || !data?.length) {
+    // Reopen the box with what was typed, so nothing is lost.
+    note.body = old; state.appending = note.id; state.appendDraft = text; state.appendFocus = true; rerender();
+    toast('Couldn\'t add: ' + (error?.message || 'note not found') + '. Your text is still in the box.');
+    return;
+  }
+  state.appendDraft = '';
   replaceNote(data[0]); scheduleTagRefresh();
 }
 
@@ -2119,7 +2165,9 @@ function deleteNote(note) {
   for (const k in state.children) state.children[k] = state.children[k].filter((n) => n.id !== note.id);
   if (state.view === 'board') renderBoard(); else rerender();
   let undone = false;
-  const del = sb.from('notes').delete().eq('id', note.id);
+  // Notes inside this one pop out when it's deleted; remember them so Undo can put them back.
+  const kidsP = sb.from('notes').select('id').eq('parent_id', note.id).then(({ data }) => (data || []).map((k) => k.id));
+  const del = kidsP.then(() => sb.from('notes').delete().eq('id', note.id));
   del.then(({ error }) => { if (error) { toast('Couldn\'t delete: ' + error.message); loadNotes(true); } else scheduleTagRefresh(); });
   toast('Note deleted', 'Undo', async () => {
     undone = true;
@@ -2127,6 +2175,8 @@ function deleteNote(note) {
     const { _queued, ...row } = note;
     const { data, error } = await sb.from('notes').insert({ id: row.id, body: row.body, tags: row.tags, source: row.source, pinned: row.pinned, attachments: row.attachments, archived_at: row.archived_at ?? null, parent_id: row.parent_id ?? null, created_at: row.created_at }).select().single();
     if (error) { toast('Couldn\'t restore: ' + error.message); return; }
+    const kids = await kidsP;
+    if (kids.length) { await sb.from('notes').update({ parent_id: data.id }).in('id', kids); loadNotes(true); scheduleNestingRefresh(); }
     state.notes.splice(Math.max(0, idx), 0, data); renderFeed(); scheduleTagRefresh();
     if (state.view === 'board') loadBoard();
   }, 7000);
@@ -2233,6 +2283,7 @@ async function loadBoard() {
 }
 
 function renderBoard() {
+  captureEditDraft();
   const el = $('#view-board');
   const cols = state.settings?.board_tags || [];
   let html = `<div class="board-head"><h2>Board</h2><span class="spacer" style="flex:1"></span>${state.boardPicking ? '' : '<button class="btn ghost small" data-board="edit">Change columns</button>'}</div>`;
@@ -2308,7 +2359,12 @@ async function moveCardToColumn(note, from, to) {
   state.boardNotes[from] = (state.boardNotes[from] || []).filter((n) => n.id !== note.id);
   if (!(state.boardNotes[to] || []).some((n) => n.id === note.id)) (state.boardNotes[to] ||= []).unshift({ ...note, ...patch, tags: [...new Set([...(patch.tags || note.tags.filter((t) => t !== from)), to])] });
   renderBoard();
-  let { data, error } = await sb.from('notes').update(patch).eq('id', note.id).select().single();
+  // Only if the note is unchanged since the board loaded, so a newer edit isn't overwritten.
+  let q = sb.from('notes').update(patch).eq('id', note.id);
+  if (note.updated_at) q = q.eq('updated_at', note.updated_at);
+  let { data: rows, error } = await q.select();
+  if (!error && !rows.length) { toast('That note just changed on another device. The board has been refreshed; try again.'); loadBoard(); return; }
+  let data = rows?.[0];
   // A manual copy of the old tag can survive a text swap; drop it too.
   if (!error && data.tags.includes(from) && patch.body) {
     ({ data, error } = await sb.from('notes').update({ tags: data.tags.filter((t) => t !== from).concat(data.tags.includes(to) ? [] : [to]) }).eq('id', note.id).select().single());
@@ -2319,7 +2375,9 @@ async function moveCardToColumn(note, from, to) {
     toast(`Still under #${from}: the note starts with the word "${from}", which files it there automatically`);
   } else {
     toast(`Moved to #${to}`, 'Undo', async () => {
-      await sb.from('notes').update({ body: before.body }).eq('id', note.id);
+      // Undo only if nothing else changed the note since the move.
+      const { data: r1, error: e1 } = await sb.from('notes').update({ body: before.body }).eq('id', note.id).eq('updated_at', data.updated_at).select();
+      if (e1 || !r1.length) { toast(e1 ? 'Couldn\'t undo: ' + e1.message : 'Can\'t undo: the note changed since the move.'); loadBoard(); return; }
       await sb.from('notes').update({ tags: before.tags }).eq('id', note.id);
       scheduleTagRefresh(); loadBoard(); loadNotes(true);
     });
@@ -2483,7 +2541,7 @@ async function onReminderClick(e) {
   const card = e.target.closest('[data-rem]');
   const id = card.dataset.rem;
   const r = state.reminders.find((x) => x.id === id); if (!r) return;
-  let patch = null;
+  let patch = null, okMsg = '';
   if (a === 'move') { startMove(r); return; }
   if (a === 'edit') {
     delete state.dp[id];
@@ -2510,8 +2568,8 @@ async function onReminderClick(e) {
   } else if (a === 'toggle') {
     if (!r.done && r.repeat) {
       const next = nextOccurrence(r.due_at, r.repeat, r.dates);
-      if (next) { patch = { due_at: next.toISOString() }; toast('Next: ' + whenLabel(next)); }
-      else { patch = { done: true }; toast('Last date done ✓'); }
+      if (next) { patch = { due_at: next.toISOString() }; okMsg = 'Next: ' + whenLabel(next); }
+      else { patch = { done: true }; okMsg = 'Last date done ✓'; }
     }
     else patch = { done: !r.done };
   } else if (a === 'snooze') {
@@ -2522,9 +2580,16 @@ async function onReminderClick(e) {
     if (error) toast('Couldn\'t delete: ' + error.message);
     loadReminders(); return;
   }
+  const seen = { due_at: r.due_at, done: r.done };
   Object.assign(r, patch); renderRemViews();
-  const { error } = await sb.from('reminders').update(patch).eq('id', id);
+  // Only if the reminder is as you saw it: if Hermes just delivered it (and moved it to its
+  // next time), checking it off again would skip an occurrence.
+  let q = sb.from('reminders').update(patch).eq('id', id);
+  if (a === 'toggle' || a === 'snooze') q = q.eq('due_at', seen.due_at).eq('done', seen.done);
+  const { data, error } = await q.select('id');
   if (error) toast('Couldn\'t update: ' + error.message);
+  else if (!data.length) toast('That reminder just changed (it may have been delivered). It\'s been refreshed.');
+  else if (okMsg) toast(okMsg);
   loadReminders();
 }
 $('#view-reminders').addEventListener('click', onReminderClick);
