@@ -2772,12 +2772,31 @@ const Push = {
   },
 };
 
+// "Where should reminders go?" (settings.reminder_delivery). The server makes Telegram
+// a backup for phone-only: anything a notification couldn't deliver within 10 minutes,
+// or everything when no device has notifications on.
+const DELIVERY = [
+  ['both', 'Phone notifications and Telegram'],
+  ['push', 'Phone notifications only (Telegram as backup)'],
+  ['telegram', 'Telegram only'],
+];
+function deliveryHtml(deviceCount) {
+  const cur = state.settings?.reminder_delivery || 'both';
+  const note = cur === 'push' && !deviceCount ? 'No device has notifications on yet, so Telegram keeps delivering until you turn them on.'
+    : cur === 'push' ? 'If a notification can\'t be delivered, the reminder goes to Telegram after 10 minutes.'
+    : cur === 'telegram' ? 'Devices with notifications on won\'t get reminders until you change this.' : '';
+  return `<p class="help" style="margin:12px 0 6px"><strong>Where should reminders go?</strong></p>
+    <select class="field" id="set-delivery">${DELIVERY.map(([v, l]) => `<option value="${v}"${v === cur ? ' selected' : ''}>${l}</option>`).join('')}</select>
+    ${note ? `<p class="help" style="margin-top:6px">${note}</p>` : ''}`;
+}
+
 // The Notifications section of Settings.
 async function renderPushSection(el) {
   if (!Push.supported() || location.protocol !== 'https:') {
-    el.innerHTML = Push.isIOS() && !Push.standalone()
+    const { count } = await sb.from('push_subscriptions').select('id', { count: 'exact', head: true });
+    el.innerHTML = (Push.isIOS() && !Push.standalone()
       ? '<p class="help">On iPhone, notifications need BrainFeed on your Home Screen: in Safari tap Share → <strong>Add to Home Screen</strong>, then open BrainFeed from that icon and come back here.</p>'
-      : '<p class="help">This browser can\'t receive push notifications. Telegram reminders through Hermes still work.</p>';
+      : '<p class="help">This browser can\'t receive push notifications. Telegram reminders through Hermes still work.</p>') + deliveryHtml(count || 0);
     return;
   }
   const sub = await Push.current();
@@ -2789,7 +2808,8 @@ async function renderPushSection(el) {
     <div class="row">${mine
       ? '<span style="align-self:center;font-size:14px">🔔 On for this device</span><span class="spacer" style="flex:1"></span><button class="btn ghost small" data-set="push-test">Send test</button><button class="btn ghost small" data-set="push-off">Turn off</button>'
       : '<button class="btn small" data-set="push-on">Turn on notifications</button>'}</div>
-    ${others.length ? `<p class="help" style="margin-top:8px">Also on: ${others.map((d) => esc(d.device || 'another device')).join(', ')}</p>` : ''}`;
+    ${others.length ? `<p class="help" style="margin-top:8px">Also on: ${others.map((d) => esc(d.device || 'another device')).join(', ')}</p>` : ''}
+    ${deliveryHtml((devices || []).length)}`;
 }
 
 async function openSettings(focus) {
@@ -2831,6 +2851,15 @@ async function openSettings(focus) {
   </div>`;
   document.body.appendChild(back);
   const pushEl = back.querySelector('#set-push');
+  pushEl.addEventListener('change', async (e) => {
+    if (e.target.id !== 'set-delivery') return;
+    const v = e.target.value, prev = state.settings?.reminder_delivery || 'both';
+    const { data, error } = await sb.from('settings').update({ reminder_delivery: v, updated_at: new Date().toISOString() }).eq('user_id', state.user.id).select().single();
+    if (error) { toast('Couldn\'t save: ' + error.message); e.target.value = prev; return; }
+    state.settings = data;
+    toast(v === 'push' ? 'Reminders will go to your phone (Telegram as backup)' : v === 'telegram' ? 'Reminders will go to Telegram only' : 'Reminders will go to your phone and Telegram');
+    renderPushSection(pushEl).catch(() => {});
+  });
   renderPushSection(pushEl).catch(() => { pushEl.innerHTML = '<p class="help">Couldn\'t check notifications on this device.</p>'; });
   if (focus === 'push') back.querySelector('#set-push-h').scrollIntoView({ block: 'start' });
   back.querySelector('#set-season').value = lsGet(LS.season, 'auto');
