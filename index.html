@@ -958,8 +958,8 @@ async function addNote(body, files = [], source = 'web') {
     queuePush({ id, body, source, created_at });
     return true;
   }
+  const attachments = [];
   try {
-    const attachments = [];
     for (const f of files) attachments.push(await uploadFile(id, f));
     const { data, error } = await sb.from('notes').insert({ id, body, source, attachments, created_at }).select().single();
     if (error) throw error;
@@ -973,6 +973,9 @@ async function addNote(body, files = [], source = 'web') {
       markQueued(id);
       return true;
     }
+    // Files that uploaded before the failure would be left behind; remove them (the draft
+    // keeps the originals, so a retry uploads them again cleanly).
+    if (attachments.length) sb.storage.from(BUCKET).remove(attachments.map((a) => a.path)).catch(() => {});
     state.notes = state.notes.filter((n) => n.id !== id); renderFeed();
     toast(network ? 'Lost connection while uploading. Your note is back in the box; try again when you\'re online.' : 'Couldn\'t save: ' + err.message + '. Your note is back in the box.');
     return false;
@@ -2263,7 +2266,8 @@ async function exportNotes() {
     if (error) { toast('Export failed: ' + error.message); return; }
     all.push(...data); if (data.length < 1000) break; from += 1000;
   }
-  const { data: reminders } = await sb.from('reminders').select('*').order('due_at');
+  const { data: reminders, error: remErr } = await sb.from('reminders').select('*').order('due_at');
+  if (remErr) { toast('Export failed (reminders): ' + remErr.message); return; }
   const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), notes: all, reminders }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = `brainfeed-${new Date().toISOString().slice(0, 10)}.json`; a.click();
@@ -2279,6 +2283,8 @@ async function loadBoard() {
   if (cols.length < 2) { state.boardPicking = true; state.pickTags = [...cols]; renderBoard(); return; }
   const results = await Promise.all(cols.map((t) => sb.from('notes').select(NOTE_SELECT).contains('tags', [t]).is('archived_at', null).order('pinned', { ascending: false }).order('created_at', { ascending: false }).limit(100)));
   cols.forEach((t, i) => { state.boardNotes[t] = results[i].data || []; });
+  const failed = cols.filter((_, i) => results[i].error);
+  if (failed.length) toast(`Couldn't load ${failed.map((t) => '#' + t).join(', ')}. Reload to try again.`);
   renderBoard();
 }
 
@@ -2626,7 +2632,9 @@ async function moveReminderToDay(r, key) {
   const { error } = await sb.from('reminders').update({ due_at: r.due_at }).eq('id', r.id);
   if (error) { r.due_at = prev; renderRemViews(); toast('Couldn\'t move: ' + error.message); return; }
   toast(`Moved to ${whenLabel(d)}${d <= new Date() ? ' (that time has passed, so it\'s due now)' : ''}`, 'Undo', async () => {
-    await sb.from('reminders').update({ due_at: prev }).eq('id', r.id); loadReminders();
+    const { data, error } = await sb.from('reminders').update({ due_at: prev }).eq('id', r.id).eq('due_at', d.toISOString()).select('id');
+    if (error || !data.length) toast(error ? 'Couldn\'t undo: ' + error.message : 'Can\'t undo: the reminder changed since the move.');
+    loadReminders();
   });
   loadReminders();
 }
@@ -2713,11 +2721,15 @@ function occurrences(r, from, to) {
   return out;
 }
 
+let calSeq = 0;
 async function loadCalendarNotes() {
   if (!state.cal.month) return;
+  const seq = ++calSeq;
   const { start, end } = calRange();
-  const { data } = await sb.from('notes').select(NOTE_SELECT).is('archived_at', null)
+  const { data, error } = await sb.from('notes').select(NOTE_SELECT).is('archived_at', null)
     .gte('created_at', start.toISOString()).lt('created_at', end.toISOString()).order('created_at').limit(2000);
+  if (seq !== calSeq) return; // you've already moved to another month or week
+  if (error) { toast('Couldn\'t load notes for the calendar: ' + error.message); return; }
   state.cal.notes = data || [];
   if (state.view === 'calendar') renderCalendar();
 }
