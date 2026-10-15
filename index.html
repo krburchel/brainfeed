@@ -256,6 +256,30 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
 .empty strong { display: block; color: var(--text); font-size: 17px; margin-bottom: 4px; }
 .load-more { display: block; margin: 16px auto; }
 
+/* ---------- Compact layout (menu → Layout: Compact) ---------- */
+/* Each day's notes become one connected list with hairline dividers. */
+.compact .day { margin: 12px 4px 5px; font-size: 11px; }
+.compact .day:first-child { margin-top: 0; }
+.compact .note { border-radius: 0; margin: 0; padding: 7px 12px 3px; font-size: 14.5px; line-height: 1.4; }
+.compact .note + .note { border-top: 0; }
+.compact .note-meta .src { display: none; }
+.compact .note-meta > span:first-child { white-space: nowrap; }
+.compact .day + .note, .compact #feed > .note:first-child { border-top-left-radius: 12px; border-top-right-radius: 12px; }
+.compact .note:has(+ .day), .compact .note:has(+ .load-more), .compact .note:last-child { border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }
+.compact .note.pinned { border-color: var(--border); background: color-mix(in srgb, var(--accent) 5%, var(--surface)); }
+.compact .note-meta { margin-top: 1px; font-size: 11px; min-height: 22px; }
+.compact .note-actions .tool { width: 22px; height: 22px; }
+.compact .note-actions .tool svg { width: 14px; height: 14px; }
+.compact .note-body.folded { max-height: 7.2em; }
+.compact .note-body .h1 { font-size: 1.12em; margin: 0 0 2px; }
+.compact .check-item { padding: 1px 0; gap: 7px; }
+.compact .check-item input { width: 15px; height: 15px; }
+.compact .add-item { padding: 2px 0 2px 22px; font-size: 13px; }
+.compact .attach { margin-top: 5px; }
+.compact .attach img { width: 64px; height: 64px; border-radius: 7px; }
+.compact .extra-tags { margin-top: 3px; }
+.compact .composer { margin-bottom: 12px; }
+
 /* ---------- Checklists ---------- */
 .checklist { margin: 4px 0 2px; white-space: normal; }
 .check-item { display: flex; gap: 9px; align-items: flex-start; padding: 3px 0; cursor: pointer; }
@@ -481,6 +505,7 @@ mark { background: color-mix(in srgb, var(--warn) 30%, transparent); color: inhe
           <div class="who" id="who"></div>
           <button data-action="theme">Theme: <span id="theme-label">Auto</span></button>
           <button data-action="tagbar">Tag bar: <span id="tagbar-label">Full</span></button>
+          <button data-action="density">Layout: <span id="density-label">Comfortable</span></button>
           <button data-action="review">Review notes</button>
           <button data-action="notify">Notifications…</button>
           <button data-action="settings">Settings &amp; connected agents</button>
@@ -570,7 +595,7 @@ const SUPABASE_URL = 'https://bzvibdjrknqvmurwjroq.supabase.co';
 const SUPABASE_KEY = 'sb_publishable__ybJKWB4JLb19YgGdW8LCg_Z4Xu5iSW';
 const PAGE = 50;
 const BUCKET = 'attachments';
-const LS = { queue: 'bf-queue', cache: 'bf-cache', theme: 'bf-theme', alerted: 'bf-alerted', season: 'bf-season', seasonFx: 'bf-season-fx', tagbar: 'bf-tagbar', pushOn: 'bf-push-on' };
+const LS = { queue: 'bf-queue', cache: 'bf-cache', theme: 'bf-theme', alerted: 'bf-alerted', season: 'bf-season', seasonFx: 'bf-season-fx', tagbar: 'bf-tagbar', pushOn: 'bf-push-on', density: 'bf-density' };
 
 // A password-reset email link lands here with #...type=recovery; note it before
 // the client reads (and clears) the hash.
@@ -787,7 +812,7 @@ let realtime = null, reminderTimer = null;
 async function startApp() {
   try { navigator.storage?.persist?.(); } catch {}
   $('#auth').classList.add('hidden');
-  applyTagBar();
+  applyTagBar(); applyDensity();
   $('#app').classList.remove('hidden');
   $('#who').textContent = state.user.email;
 
@@ -1313,7 +1338,8 @@ function noteHtml(n, compact = false, child = false) {
   return `<article class="note${n.pinned ? ' pinned' : ''}${n._queued ? ' queued' : ''}" data-id="${n.id}">
     ${(() => {
       // Long notes fold to a preview (not while searching, so matches stay visible).
-      const long = !state.query && state.appending !== n.id && (n.body.length > 900 || n.body.split('\n').length > 14);
+      const compact = lsGet(LS.density, 'comfortable') === 'compact';
+      const long = !state.query && state.appending !== n.id && (compact ? n.body.length > 320 || n.body.split('\n').length > 5 : n.body.length > 900 || n.body.split('\n').length > 14);
       const open = state.openBodies.has(n.id);
       return `<div class="note-body${long && !open ? ' folded' : ''}">${highlight(renderBody(n.body))}</div>`
         + (long ? `<button class="more-btn" data-act="more">${open ? 'Show less' : 'Show more'}</button>` : '');
@@ -1402,6 +1428,13 @@ function renderStatus(loading) {
 const TAGBAR_MODES = ['full', 'filters', 'hidden'];
 const TAGBAR_LABELS = { full: 'Full', filters: 'Filters only', hidden: 'Hidden' };
 function tagBarMode() { const m = lsGet(LS.tagbar, 'full'); return TAGBAR_MODES.includes(m) ? m : 'full'; }
+// Layout density, per device: "comfortable" cards or a "compact" list.
+function applyDensity() {
+  const c = lsGet(LS.density, 'comfortable') === 'compact';
+  document.documentElement.classList.toggle('compact', c);
+  const l = $('#density-label'); if (l) l.textContent = c ? 'Compact' : 'Comfortable';
+}
+
 function applyTagBar() {
   const show = state.view === 'feed' && tagBarMode() !== 'hidden';
   $('#aside').classList.toggle('hidden', !show);
@@ -2239,7 +2272,10 @@ document.addEventListener('click', (e) => { if (!e.target.closest('#menu')) $('#
 $('#menu').addEventListener('click', async (e) => {
   const a = e.target.closest('[data-action]')?.dataset.action; if (!a) return;
   $('#menu').classList.add('hidden');
-  if (a === 'review') {
+  if (a === 'density') {
+    lsSet(LS.density, lsGet(LS.density, 'comfortable') === 'compact' ? 'comfortable' : 'compact');
+    applyDensity(); rerender();
+  } else if (a === 'review') {
     openReview();
   } else if (a === 'tagbar') {
     const m = TAGBAR_MODES[(TAGBAR_MODES.indexOf(tagBarMode()) + 1) % TAGBAR_MODES.length];
