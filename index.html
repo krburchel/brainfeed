@@ -199,6 +199,12 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
   padding: 4px 4px;
 }
 .composer-bar { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+/* Phones: an empty, idle composer shrinks to one line; tapping it brings back the tools. */
+@media (max-width: 820px) {
+  .composer.collapsed { padding: 6px 12px; box-shadow: none; }
+  .composer.collapsed textarea { min-height: 32px; height: 32px !important; padding-top: 6px; }
+  .composer.collapsed .composer-bar, .composer.collapsed .pending-files { display: none; }
+}
 .composer-bar .spacer { flex: 1; }
 .composer-bar .hint { font-size: 12px; color: var(--muted); }
 .tool {
@@ -246,6 +252,12 @@ aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; co
 @media (hover: none) { .note-actions { opacity: 1; } }
 .note-actions .tool { width: 28px; height: 28px; }
 .note-actions .tool.pin-on { color: var(--accent); }
+.note-menu { position: absolute; right: 8px; top: calc(100% - 6px); z-index: 25; min-width: 200px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); padding: 4px; }
+.note-menu.up { top: auto; bottom: 34px; }
+.note-menu button { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: none; color: var(--text); font: inherit; font-size: 14px; text-align: left; padding: 8px 10px; border-radius: 8px; cursor: pointer; }
+.note-menu button:hover, .note-menu button:focus-visible { background: var(--surface-2); outline: none; }
+.note-menu button svg { color: var(--muted); flex-shrink: 0; }
+.note-menu button.danger, .note-menu button.danger svg { color: var(--danger); }
 .extra-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
 .attach { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .attach img { width: 120px; height: 120px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); cursor: zoom-in; }
@@ -1130,6 +1142,7 @@ const ICON = {
   folder: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 10v6M9 13l3 3 3-3"/></svg>',
   folderOut: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 16v-6M9 13l3-3 3 3"/></svg>',
   archive: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg>',
+  dots: '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
   trash: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
   file: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>',
   check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
@@ -1323,6 +1336,26 @@ function continueChecklist(ta, e) {
   return true;
 }
 
+// The "⋯" menu: everything except Pin and Edit. Items reuse the same data-act
+// handlers as the old buttons; the menu lives inside the note card.
+function noteMenuHtml(n, compact) {
+  const item = (act, icon, label, cls = '') => `<button role="menuitem" class="${cls}" data-act="${act}">${icon}<span>${label}</span></button>`;
+  return `<div class="note-menu" role="menu">
+    ${item('copy', ICON.copy, 'Copy text')}
+    ${compact ? '' : item('remind', ICON.bell, 'Remind me')}
+    ${item('append', ICON.plus, 'Add to this note')}
+    ${n.parent_id ? item('take-out', ICON.folderOut, 'Take out of folder note') : (compact || state.childCounts[n.id]) ? '' : item('move', ICON.folder, 'Move into a note…')}
+    ${item('archive', ICON.archive, n.archived_at ? 'Unarchive' : 'Archive')}
+    ${item('delete', ICON.trash, 'Delete', 'danger')}
+  </div>`;
+}
+function closeNoteMenu() {
+  document.querySelectorAll('.note-menu').forEach((m) => m.remove());
+  document.querySelectorAll('[data-act="menu"][aria-expanded="true"]').forEach((b) => b.setAttribute('aria-expanded', 'false'));
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && document.querySelector('.note-menu')) closeNoteMenu(); });
+document.addEventListener('scroll', () => { if (document.querySelector('.note-menu')) closeNoteMenu(); }, { passive: true, capture: true });
+
 function noteHtml(n, compact = false, child = false) {
   if (state.editing === n.id) {
     return `<div class="note edit-box" data-id="${n.id}">
@@ -1362,14 +1395,8 @@ function noteHtml(n, compact = false, child = false) {
       <span class="spacer"></span>
       <span class="note-actions">
         <button class="tool${n.pinned ? ' pin-on' : ''}" data-act="pin" title="${n.pinned ? 'Unpin' : 'Pin'}">${ICON.pin}</button>
-        <button class="tool" data-act="copy" title="Copy">${ICON.copy}</button>
-        ${compact ? '' : `<button class="tool" data-act="remind" title="Remind me about this">${ICON.bell}</button>`}
         <button class="tool" data-act="edit" title="Edit">${ICON.edit}</button>
-        <button class="tool" data-act="append" title="Add to this note">${ICON.plus}</button>
-        ${n.parent_id ? `<button class="tool" data-act="take-out" title="Take out of the note it's in">${ICON.folderOut}</button>`
-          : (compact || state.childCounts[n.id]) ? '' : `<button class="tool" data-act="move" title="Move into another note">${ICON.folder}</button>`}
-        <button class="tool" data-act="archive" title="${n.archived_at ? 'Unarchive' : 'Archive'}">${ICON.archive}</button>
-        <button class="tool" data-act="delete" title="Delete">${ICON.trash}</button>
+        <button class="tool" data-act="menu" title="More" aria-haspopup="menu" aria-expanded="false">${ICON.dots}</button>
       </span>
     </div>
     ${!child && !compact && state.expanded.has(n.id) ? `<div class="children">
@@ -1578,6 +1605,17 @@ $('#list-btn').onclick = () => {
   autosize();
 };
 if (matchMedia('(hover: none)').matches) $('#compose-hint').classList.add('hidden');
+
+// Phones: keep the composer one line tall until it's used. It stays open while it has
+// text, files, a reminder being set or dictation running.
+const composerEl = $('#composer');
+function composerIdle() { return !compose.value.trim() && !state.files.length && !state.remindMode && !Dictation.active; }
+function collapseComposer() { if (composerIdle()) composerEl.classList.add('collapsed'); }
+composerEl.addEventListener('focusin', () => composerEl.classList.remove('collapsed'));
+composerEl.addEventListener('pointerdown', () => composerEl.classList.remove('collapsed'));
+// Collapse when you tap somewhere else (not on blur: tapping a toolbar button blurs the box first).
+document.addEventListener('pointerdown', (e) => { if (!composerEl.contains(e.target)) collapseComposer(); });
+setTimeout(collapseComposer, 0); // after the rest of the script (Dictation) has loaded
 
 // ------------------------------------------------------------------
 // Dictation: the mic button types what you say into the composer, using the
@@ -1807,6 +1845,26 @@ async function submitCompose() {
 // Note actions (event delegation)
 // ------------------------------------------------------------------
 document.addEventListener('click', async (e) => {
+  const inMenu = e.target.closest('.note-menu');
+  const opener = e.target.closest('[data-act="menu"]');
+  // A click outside closes the menu now; a menu item's click is handled first (it needs to
+  // know which note it's in), then the menu closes.
+  if (!opener && document.querySelector('.note-menu')) { if (inMenu) setTimeout(closeNoteMenu, 0); else closeNoteMenu(); }
+  if (opener) {
+    const card = opener.closest('[data-id]'), wasOpen = opener.getAttribute('aria-expanded') === 'true';
+    closeNoteMenu();
+    if (!wasOpen) {
+      const n = findNote(card.dataset.id); if (!n) return;
+      card.insertAdjacentHTML('beforeend', noteMenuHtml(n, !!card.closest('#view-board, #view-calendar, .children')));
+      opener.setAttribute('aria-expanded', 'true');
+      const m = card.querySelector('.note-menu');
+      // Open downward unless that would run off the bottom of the screen.
+      if (m.getBoundingClientRect().bottom > innerHeight - 8) m.classList.add('up');
+      m.querySelector('button')?.focus({ preventScroll: true });
+    }
+    return;
+  }
+  if (inMenu && !e.target.closest('[data-act]')) return;
   if (e.target.closest('[data-review]')) { openReview(); return; }
   const tagBtn = e.target.closest('[data-tag]');
   if (tagBtn && !e.target.closest('.board-picker')) { setFilter({ tag: tagBtn.dataset.tag }); return; }
