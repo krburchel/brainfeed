@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>BrainFeed has moved</title>
+<link rel="canonical" href="https://kburchtree.cloud/brainfeed/">
+<style>
+  :root { --bg: #f6f5f1; --fg: #1f1f1d; --muted: #6a6861; --accent: #2f6fde; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ecebe6; --muted: #9c9a93; --accent: #7aa7ff; } }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 30rem; padding: 24px 16px; }
+  h1 { font-size: 1.25rem; margin: 0 0 .5rem; }
+  p { margin: .5rem 0; color: var(--muted); }
+  a { color: var(--accent); }
+  button { font: inherit; padding: .4rem .8rem; margin-top: .5rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>BrainFeed has moved</h1>
+  <p>New address: <a id="go" href="https://kburchtree.cloud/brainfeed/">kburchtree.cloud/brainfeed</a></p>
+  <p id="note">Taking you there…</p>
+  <p>Added the old one to your Home Screen? Open the new address, add it to your Home Screen, then delete the old icon.</p>
+  <div id="big" hidden>
+    <p>You have a lot saved here, so it comes over as a file: save it, then pick it on the next page.</p>
+    <button id="save">Save my data</button>
+    <a id="next" href="#">Continue to the new address</a>
+  </div>
+</main>
+<script>
+// Hands this app's saved data (not sign-in tokens) to the new address, then sends you there.
+const APP = "brainfeed";
+const RULE = {"prefixes": ["bf-"], "exclude": ["bf-push-on"]};
+const NEW = "https://kburchtree.cloud";
+
+const mine = (k) => RULE && !(RULE.exclude || []).includes(k) &&
+  ((RULE.keys || []).includes(k) || (RULE.prefixes || []).some((p) => k.startsWith(p)));
+
+async function encode(text) {
+  let bytes = new TextEncoder().encode(text), kind = "p";
+  if (typeof CompressionStream === "function") {
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+    bytes = new Uint8Array(await new Response(stream).arrayBuffer()); kind = "z";
+  }
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return kind + btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+(async () => {
+  const rest = location.pathname.replace(new RegExp("^/" + APP + "/?"), "").replace(/^(index|404)\.html$/, "")
+    + location.search + location.hash;
+  const data = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (mine(k)) data[k] = localStorage.getItem(k);
+    }
+  } catch (e) { /* storage blocked: nothing to bring */ }
+
+  const direct = NEW + "/" + APP + "/" + rest;
+  if (!Object.keys(data).length) { document.getElementById("go").href = direct; location.replace(direct); return; }
+
+  const params = new URLSearchParams({ app: APP, to: rest });
+  const packed = await encode(JSON.stringify(data)).catch(() => null);
+  if (packed && packed.length < 1500000) {
+    params.set("d", packed);
+    const url = NEW + "/move/#" + params;
+    document.getElementById("go").href = url;
+    location.replace(url);
+    return;
+  }
+  // Too big for a link: hand it over as a file instead.
+  params.set("file", "1");
+  document.getElementById("note").hidden = true;
+  document.getElementById("big").hidden = false;
+  document.getElementById("next").href = NEW + "/move/#" + params;
+  document.getElementById("save").onclick = () => {
+    const blob = new Blob([JSON.stringify({ app: APP, data })], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = APP + "-data.json"; a.click();
+  };
+})();
+</script>
+</body>
+</html>
